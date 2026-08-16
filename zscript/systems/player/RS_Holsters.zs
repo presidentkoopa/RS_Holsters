@@ -129,8 +129,13 @@ class RS_HolsterManager : EventHandler
 	// as holding fists -- the fist is never stored, it is what empty looks like.
 	Array<string> contents;
 
-	// Per hand (player * 2 + offhand), the tic a swap last happened.
-	int lastSwapTic[MAXPLAYERS * 2];
+	// Per PLAYER, not per hand, and deliberately so. player.PendingWeapon is a
+	// SINGLE field shared by both hands, and BringUpWeapon consumes it
+	// hand-blind. With a per-hand cooldown, an off-hand store landing inside the
+	// main hand's still-running lower overwrote the main hand's PendingWeapon --
+	// so that switch completed into the WRONG hand, the main hand got nothing,
+	// and its weapon was never actually put away.
+	int lastSwapTic[MAXPLAYERS];
 
 	// One prop per holster per player, flattened like contents. Held as
 	// pointers so a destroyed prop (level change, player death) reads null and
@@ -154,6 +159,13 @@ class RS_HolsterManager : EventHandler
 	double edYaw[HOLSTER_COUNT];
 	double edRoll[HOLSTER_COUNT];
 	bool   edInit;
+
+	// Not per-player, same reason edFwd etc. are not: one person wears the
+	// headset. Set by saveProfile/loadProfile whenever the name is "seated"
+	// or "standing" -- the two names switchProfile() toggles between -- so a
+	// switch always flips AWAY from whichever of the two you last touched by
+	// any means (a dedicated Save/Load button, not just the toggle itself).
+	string activeProfile;
 
 	bool editMode;
 	int  grabbedMain;  // holster index being dragged, -1 for none
@@ -183,7 +195,24 @@ class RS_HolsterManager : EventHandler
 	const BODY_YAW_FOLLOW    = 0.15;  // catch-up rate past the deadzone
 	const BODY_YAW_MAX_PITCH = 55.0;  // stop tracking beyond this head pitch
 
-	const SWAP_COOLDOWN = 12;       // tics; also covers PendingWeapon settling
+	// SLOW_SWAP_COOLDOWN (20, not 12): a default A_Lower needs (WEAPONBOTTOM 128
+	// - WEAPONTOP 32) / 6 = 16 tics to finish before BringUpWeapon runs, so at
+	// 12 the cooldown expired while ReadyWeapon was STILL the gun being put
+	// away. The next store then read that stale weapon as "held" and the
+	// dedupe pass wiped the holster it had just gone into -- the gun appeared
+	// to hop between holsters and leave the first one empty.
+	//
+	// FAST_SWAP_COOLDOWN (4) is what actually applies whenever instant switch
+	// is on (see swapCooldown() below): the whole reason for the 16-tic wait
+	// stops existing once CF_INSTANTWEAPSWITCH makes A_Lower/BringUpWeapon
+	// resolve in the SAME tic they are called, not 16 tics later. 4 is pure
+	// debounce against one physical press registering as two, not animation
+	// settling -- and it is what makes two-hand near-simultaneous store/draw
+	// actually work, instead of the second hand eating the first hand's
+	// cooldown window for an animation that, with instant switch on, does not
+	// even happen.
+	const SLOW_SWAP_COOLDOWN = 20;
+	const FAST_SWAP_COOLDOWN = 4;
 	const CLAIM_HYSTERESIS = 1.4;   // exit radius multiplier; see updateClaims
 	const CALIBRATE_MAX_TRIES = 35; // ~1 second, then stop rather than loop forever
 	const EYE_MIN = 36.0;           // sanity floor, map units (~3 feet)
@@ -439,6 +468,94 @@ class RS_HolsterManager : EventHandler
 		}
 	}
 
+	// Real persistence, replacing "read the console dump, hand-paste it into
+	// GetHolster's switch, recompile". A profile is a flat JSON document keyed
+	// "h<index>_<field>" -- level.JSONProfile* (E:\UZDXREMA
+	// src\scripting\vmthunks.cpp) is the ONLY file I/O ZScript has; it does not
+	// parse JSON on the script side, so a flat key/double shape is what the
+	// native protocol supports, not a design choice made here.
+	//
+	// name is not sanitized here -- the native refuses anything outside
+	// [A-Za-z0-9_-] on its own and returns false, which both callers already
+	// report to the console.
+	private void saveProfile(string name)
+	{
+		ensureEdit();
+		level.JSONProfileBegin();
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string key = String.Format("h%d_", h);
+			level.JSONProfileSetDouble(key .. "fwd",   edFwd[h]);
+			level.JSONProfileSetDouble(key .. "side",  edSide[h]);
+			level.JSONProfileSetDouble(key .. "frac",  edFrac[h]);
+			level.JSONProfileSetDouble(key .. "pitch", edPitch[h]);
+			level.JSONProfileSetDouble(key .. "yaw",   edYaw[h]);
+			level.JSONProfileSetDouble(key .. "roll",  edRoll[h]);
+		}
+		if (level.JSONProfileSave(name))
+		{
+			Console.Printf("\c[Gold]RS_HOLSTER: saved profile \"%s\"", name);
+			if (name == "seated" || name == "standing")
+				activeProfile = name;
+		}
+		else
+			Console.Printf("\cgRS_HOLSTER: could not save profile \"%s\" (bad name, or write failed)", name);
+	}
+
+	// Loads into the LIVE edit table, same as dragging every sphere by hand --
+	// so it takes effect immediately (updateProps reads edFwd/etc every tic)
+	// and a bad or missing profile just leaves the current table untouched
+	// rather than zeroing anything out.
+	private void loadProfile(string name)
+	{
+		ensureEdit();
+		if (!level.JSONProfileLoad(name))
+		{
+			Console.Printf("\cgRS_HOLSTER: no profile \"%s\" on disk", name);
+			return;
+		}
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			// GetHolster's own defaults are the fallback per field, not 0 --
+			// a profile saved before a 7th holster existed (hypothetically)
+			// should not zero-pitch a field it never wrote.
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+
+			string key = String.Format("h%d_", h);
+			edFwd[h]   = level.JSONProfileGetDouble(key .. "fwd",   hsFwd);
+			edSide[h]  = level.JSONProfileGetDouble(key .. "side",  hsSide);
+			edFrac[h]  = level.JSONProfileGetDouble(key .. "frac",  hsFrac);
+			edPitch[h] = level.JSONProfileGetDouble(key .. "pitch", hsPitch);
+			edYaw[h]   = level.JSONProfileGetDouble(key .. "yaw",   hsYaw);
+			edRoll[h]  = level.JSONProfileGetDouble(key .. "roll",  hsRoll);
+		}
+		Console.Printf("\c[Gold]RS_HOLSTER: loaded profile \"%s\"", name);
+		if (name == "seated" || name == "standing")
+			activeProfile = name;
+	}
+
+	// Flips between the two saved profiles and re-samples eye height for
+	// whichever posture that implies. Reloading the offset TABLE alone is not
+	// enough: anchorPos multiplies edFrac by eyeHeight[i], and that height is
+	// only ever sampled once (tryCalibrate, WorldTick) -- carrying a standing
+	// measurement into a freshly-loaded seated table (or vice versa) would
+	// place every anchor using the wrong body's proportions on the right
+	// table, or the right body's proportions on the wrong one. Neither reads
+	// as "positioned for how you are sitting right now."
+	private void switchProfile(int playerNum, PlayerPawn pawn)
+	{
+		// Empty (never touched activeProfile) falls to the "standing" branch,
+		// matching GetHolster's own built-in defaults -- a first press that
+		// does not visibly move anything, rather than jumping to a table that
+		// has never been saved and quietly falling back to those same
+		// defaults anyway.
+		string target = (activeProfile == "standing") ? "seated" : "standing";
+		loadProfile(target);
+		ForceRecalibrate(playerNum);
+		Console.Printf("\c[Gold]RS_HOLSTER: switched to \"%s\" -- hold still a moment for height to resample", target);
+	}
+
 	private void updateClaims(int i, PlayerPawn pawn)
 	{
 		// Hysteresis: a hand already inside a holster keeps it until it leaves
@@ -524,6 +641,17 @@ class RS_HolsterManager : EventHandler
 			int pi = (i * HOLSTER_COUNT) + h;
 			Vector3 at = anchorPos(i, pawn, h);
 
+			// Declared here, once, rather than where the weapon prop's own
+			// orientation math used to declare it further down -- the marker
+			// needs the same body-yaw basis now too. It used to matter for
+			// nothing but the prop, back when the marker was a sphere with no
+			// orientation to get right; a bracket reticle is not
+			// rotationally symmetric, so it needs pointing the same way.
+			double byaw = bodyYaw[i];
+
+			string hsNameM; double hsFwdM, hsSideM, hsFracM, hsRadius, hsPitchM, hsYawM, hsRollM;
+			GetHolster(h, hsNameM, hsFwdM, hsSideM, hsFracM, hsRadius, hsPitchM, hsYawM, hsRollM);
+
 			// --- the ring marker: always present, so an empty holster is
 			// still something the player can see and aim a hand at ---
 			if (markers[pi] == null)
@@ -534,6 +662,38 @@ class RS_HolsterManager : EventHandler
 				markers[pi].bINVISIBLE = false;
 				markers[pi].SetOrigin(at, true);
 				markers[pi].SetHot(nearMain[i] == h || nearOff[i] == h);
+
+				// Same live-tunable orientation the weapon prop uses (edYaw/
+				// edPitch/edRoll, not a fresh GetHolster read) -- so dragging
+				// a holster in edit mode reorients its marker too, instead of
+				// the reticle staying frozen at the un-tuned default.
+				markers[pi].angle = byaw + edYaw[h];
+				markers[pi].pitch = edPitch[h];
+				markers[pi].roll  = edRoll[h];
+
+				// Proximity feed for the tighten effect: 1.0 at the anchor,
+				// fading to 0 by SENSE_MULT*hsRadius out. Wider than the
+				// actual grab radius on purpose -- the point is a reticle
+				// that visibly notices a hand APPROACHING, not one that only
+				// reacts once the hand is already inside the tiny grab
+				// volume (at which point SetHot's binary swap already fired).
+				// Plain local, not const -- every const in this codebase is a
+				// CLASS-level member (HOLSTER_COUNT, SWAP_COOLDOWN, etc.), never
+				// a local declared inside a method body, and there is no way to
+				// test-compile before this ships to find out the hard way.
+				double senseMult = 4.0;
+				double dMain = (pawn.AttackPos - at).Length();
+				double dOff  = (pawn.OffhandPos - at).Length();
+				// No bare Min()/Clamp() -- neither has any precedent as a
+				// builtin anywhere in this engine's own ZScript (only Max()
+				// does), and there is no way to test-compile before this
+				// ships, so plain comparisons it is.
+				double dNear = (dMain < dOff) ? dMain : dOff;
+				double senseRange = hsRadius * senseMult;
+				double norm = (senseRange > 0.0) ? (dNear / senseRange) : 1.0;
+				if (norm < 0.0) norm = 0.0;
+				if (norm > 1.0) norm = 1.0;
+				markers[pi].SetProximity(1.0 - norm);
 			}
 
 			// --- the stored weapon's model, when there is one ---
@@ -547,6 +707,34 @@ class RS_HolsterManager : EventHandler
 			let p = props[pi];
 
 			string stored = contents[(i * HOLSTER_COUNT) + h];
+
+			// --- reconcile the slot against reality ---
+			// contents[] is only ever written by doSwap, so it drifts: a stored
+			// weapon stays in inventory and the engine can re-arm it (ammo
+			// pickup -> CheckWeaponSwitch), or it can be dropped, or promoted
+			// into a different class by a tier upgrade. Any of those leaves the
+			// table describing a holster that does not match the world.
+			//
+			// GATED ON THE SWITCH HAVING SETTLED, and that gate is the whole
+			// trick: for the ~16 tics a weapon spends lowering, ReadyWeapon is
+			// STILL the gun being put away. Reconciling during that window would
+			// see "the stored weapon is in a hand" on the very tic after every
+			// store and erase all six holsters as fast as they were filled.
+			// PendingWeapon == WP_NOCHANGE means no switch is in flight.
+			if (stored != "" && pawn.player.PendingWeapon == WP_NOCHANGE
+			    && level.time - lastSwapTic[i] >= swapCooldown())
+			{
+				let rw = pawn.player.ReadyWeapon;
+				let ow = pawn.player.OffhandWeapon;
+				bool inHand = (rw != null && rw.GetClassName() == stored)
+				           || (ow != null && ow.GetClassName() == stored);
+
+				if (inHand || pawn.FindInventory(stored) == null)
+				{
+					contents[(i * HOLSTER_COUNT) + h] = "";
+					stored = "";
+				}
+			}
 			// Show first: it reads level.GetModelOrientationHint, which the
 			// angle below depends on.
 			p.ShowWeapon(stored == "" ? null : Weapon(pawn.FindInventory(stored)));
@@ -573,7 +761,7 @@ class RS_HolsterManager : EventHandler
 			// weapon bakes at most one of the three axes; a weapon baking two
 			// or more non-commuting axes at once would need real matrix math
 			// to cancel exactly, which none of the current data requires.
-			double byaw = bodyYaw[i];
+			// byaw is declared once, up with the marker orientation code above.
 			double extra = RS_HolsterProp.holsterPropYaw() + edYaw[h];
 			if (p.mirrored)
 				extra += 180.0;
@@ -614,8 +802,14 @@ class RS_HolsterManager : EventHandler
 			double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
 			bool foundWorld;
 			double worldOffX, worldOffY, worldOffZ;
+			// p.scale is passed because the renderer multiplies the model's
+			// baked offset by it. Omitting it (defaulting to 1,1) subtracted a
+			// full-size correction from a prop drawn at 0.18 -- roughly four
+			// times too much -- which is why shrinking a weapon threw it out of
+			// the sphere instead of settling it in the middle.
 			[foundWorld, worldOffX, worldOffY, worldOffZ] =
-				level.GetModelWorldOffset(p.shownClass, p.sprite, p.frame, stretch, finalAngle, finalPitch, p.roll);
+				level.GetModelWorldOffset(p.shownClass, p.sprite, p.frame, stretch, finalAngle, finalPitch, p.roll,
+				                          p.scale.X, p.scale.Y);
 			if (!foundWorld) { worldOffX = 0.0; worldOffY = 0.0; worldOffZ = 0.0; }
 
 			// Manual trim, local rotated frame, on top of the automatic
@@ -687,7 +881,6 @@ class RS_HolsterManager : EventHandler
 
 	private Weapon findFist(PlayerPawn pawn, bool offhand) const
 	{
-		Weapon anyFist = null;
 		for (Inventory item = pawn.Inv; item != null; item = item.Inv)
 		{
 			let w = Weapon(item);
@@ -701,10 +894,16 @@ class RS_HolsterManager : EventHandler
 
 			if (w.bOffhandWeapon == offhand)
 				return w;      // the one that belongs in this hand
-			if (anyFist == null)
-				anyFist = w;   // fallback if the matching one is not owned
 		}
-		return anyFist;
+
+		// No fallback to "any fist". A wrong-hand fist can NEVER be seated --
+		// MoveWeaponToHand's first guard rejects it silently because every fist
+		// carries +WEAPON.NOHANDSWITCH -- so handing one back only produced a
+		// store that emptied nothing while the table recorded it as done. That
+		// is the "offhand never lets go of the gun" bug, reintroduced by the
+		// very fallback that was meant to be defensive. Null is the honest
+		// answer, and the caller rolls the store back.
+		return null;
 	}
 
 	private void ensureProps()
@@ -720,6 +919,17 @@ class RS_HolsterManager : EventHandler
 	{
 		let cv = CVar.GetCVar("rs_holster_props", players[consoleplayer]);
 		return (cv != null) ? cv.GetBool() : true;
+	}
+
+	private bool instantSwitchEnabled() const
+	{
+		let cv = CVar.GetCVar("rs_holster_instant_switch", players[consoleplayer]);
+		return (cv != null) ? cv.GetBool() : true;
+	}
+
+	private int swapCooldown() const
+	{
+		return instantSwitchEnabled() ? FAST_SWAP_COOLDOWN : SLOW_SWAP_COOLDOWN;
 	}
 
 	override void NetworkProcess(ConsoleEvent evt)
@@ -775,6 +985,21 @@ class RS_HolsterManager : EventHandler
 			return;
 		}
 
+		// Two named profiles, not a generic named-save flow: a hip/pectoral
+		// table tuned standing does not fit a seated body (shorter reach,
+		// different eye-to-hip fraction), so "which profile" is really "which
+		// posture", and posture only has two values worth a dedicated bind.
+		if (evt.name == "rs-holster-save-seated")   { saveProfile("seated");   return; }
+		if (evt.name == "rs-holster-load-seated")   { loadProfile("seated");   return; }
+		if (evt.name == "rs-holster-save-standing") { saveProfile("standing"); return; }
+		if (evt.name == "rs-holster-load-standing") { loadProfile("standing"); return; }
+
+		// The switcher: flips to whichever of the two you are not currently
+		// on, and re-samples eye height for it. One bind, no menu digging --
+		// this is the one meant for mid-session use (you just sat down),
+		// where the four buttons above are a setup-time thing.
+		if (evt.name == "rs-holster-switch-profile") { switchProfile(evt.player, pawn); return; }
+
 		// One key per hand -- which hand pressed decides which weapon moves,
 		// or in edit mode which sphere gets dragged.
 		if (evt.name == "rs-holster-grab-main")
@@ -789,6 +1014,46 @@ class RS_HolsterManager : EventHandler
 		}
 	}
 
+	// Wraps MoveWeaponToHand with a transient CF_INSTANTWEAPSWITCH, restored
+	// immediately after. A dedicated helper rather than inlining this at both
+	// call sites in doSwap means there is no early-return path that could
+	// leave the flag set -- set/call/restore is one atomic sequence with
+	// nothing else inside it to return out of early. (An earlier version of
+	// this set the flag before doSwap's validation checks instead of right
+	// around the call; those checks have their own early returns, which would
+	// have left the flag stuck on for the rest of the session.)
+	//
+	// CF_INSTANTWEAPSWITCH is a real, complete GZDoom mechanism
+	// (constants.zs) that both A_Lower and BringUpWeapon already check
+	// (weapons.zs / player.zs) -- setting it makes psp.y jump straight to
+	// WEAPONBOTTOM/WEAPONTOP instead of climbing 6 units/tic, so the whole
+	// lower-then-raise sequence resolves SYNCHRONOUSLY inside the
+	// MoveWeaponToHand call, same tic, rather than over the ~16 tics that
+	// made two-hand near-simultaneous store/draw fight over one shared
+	// PendingWeapon. Restored right after so ordinary weapon switching
+	// (number keys, the wheel) keeps its normal animated feel -- this only
+	// ever touches the switch a holster itself just triggered.
+	//
+	// Checked for side effects before using it: RS_ScoreRevival.zs is the
+	// only place in RS_Main that reads player.cheats for anything besides a
+	// single unrelated HUD check (CF_CHASECAM in RS_HealthBars.zs), and it
+	// only tests the invincibility bits (CF_BUDDHA/CF_BUDDHA2/CF_GODMODE/
+	// CF_GODMODE2) -- nothing anywhere treats "cheats nonzero" as a global
+	// cheated-run flag that this would trip.
+	private void moveWeaponInstant(PlayerPawn pawn, Weapon w, int hand)
+	{
+		if (!instantSwitchEnabled())
+		{
+			pawn.MoveWeaponToHand(w, hand);
+			return;
+		}
+		bool wasSet = (pawn.player.cheats & CF_INSTANTWEAPSWITCH) != 0;
+		pawn.player.cheats |= CF_INSTANTWEAPSWITCH;
+		pawn.MoveWeaponToHand(w, hand);
+		if (!wasSet)
+			pawn.player.cheats &= ~CF_INSTANTWEAPSWITCH;
+	}
+
 	// Swap what the hand is holding with what the holster holds. Because an
 	// empty hand always means "fists" and an empty holster always means
 	// "nothing stored", both directions are the same operation: read both
@@ -798,14 +1063,21 @@ class RS_HolsterManager : EventHandler
 		if (holsterIdx < 0)
 			return; // hand was not in a holster; nothing claimed it
 
-		// Debounce. A held or repeating key must not swap more than once, and
-		// a swap also cannot settle instantly -- PendingWeapon takes a tic or
-		// two to become ReadyWeapon, so a second swap inside that window reads
-		// the OLD held weapon and shuffles the same gun back and forth.
-		int idx = (i * 2) + (offhand ? 1 : 0);
-		if (level.time - lastSwapTic[idx] < SWAP_COOLDOWN)
+		// Debounce. A held or repeating key must not swap more than once. With
+		// instant switch OFF, a swap also cannot settle immediately --
+		// PendingWeapon takes ~16 tics to become ReadyWeapon, so a second swap
+		// inside that window reads the OLD held weapon and shuffles the same
+		// gun back and forth; with it ON (the default), that window is gone
+		// and swapCooldown() is pure debounce, short enough that both hands
+		// can act within the same reach without one eating the other's.
+		// Checked here but NOT charged here -- the write lives at the end, next
+		// to the confirm haptic. Charging on entry meant every no-op press
+		// (fists into an empty holster, a same-weapon repeat, a stale slot)
+		// burned a full cooldown, so recovering from a bad slot needed two
+		// presses spaced a cooldown apart with no indication why the first did
+		// nothing.
+		if (level.time - lastSwapTic[i] < swapCooldown())
 			return;
-		lastSwapTic[idx] = level.time;
 
 		ensureContents();
 
@@ -838,11 +1110,18 @@ class RS_HolsterManager : EventHandler
 		if (stored == "" && heldName == "")
 			return; // fists into an empty holster: nothing to do
 
-		// Same weapon on both sides is a no-op that still costs a weapon
-		// switch. It happens when PendingWeapon has not settled yet and the
-		// hand still reports the gun it just stored.
-		if (stored == heldName)
+		// The slot names the very gun this hand is holding. That is not a
+		// legitimate no-op -- it is a STALE SLOT. A stored weapon never leaves
+		// inventory, so CheckWeaponSwitch re-arms it on the next ammo pickup
+		// while the table still claims the holster holds it. Returning early
+		// here was the jam: that holster could then never be drawn from OR
+		// stored into again for the rest of the session, because every future
+		// press hit this same guard. Clear it and let the next press work.
+		if (stored != "" && stored == heldName)
+		{
+			contents[slot] = "";
 			return;
+		}
 
 		// A weapon lives in exactly one holster. Without this, storing the
 		// same gun in two places leaves both claiming it, and drawing from
@@ -863,30 +1142,49 @@ class RS_HolsterManager : EventHandler
 		// instance rather than spawning a fresh one is essential: GunBonsai
 		// perks live on the instance, and a new copy would silently drop every
 		// perk rolled on that weapon.
+		int hand = offhand ? 1 : 0;
+
 		if (stored != "")
 		{
 			let w = Weapon(pawn.FindInventory(stored));
-			if (w != null)
+			if (w == null)
 			{
-				// MoveWeaponToHand, never a raw OffhandWeapon assignment.
-				// Assigning the pointer directly leaves the hand's psprite
-				// still running the OLD weapon's states with the new weapon as
-				// caller, and the VM aborts the moment one of those state
-				// functions type-checks its owner:
-				//   "Invalid class VR_Fist in function call to VR_SMG.StateFunction"
-				// This routes through PendingWeapon and DropWeapon/BringUpWeapon
-				// so the psprite is torn down and rebuilt properly.
-				pawn.MoveWeaponToHand(w, offhand ? 1 : 0);
-			}
-			else
-			{
-				// Owned when stored, gone now (dropped, class-gated away, mod
-				// removed it). Clear the slot rather than leaving a holster
-				// pointing at a weapon that cannot be drawn.
+				// Owned when stored, gone now (dropped, tier-promoted into a
+				// different class, mod removed it). Clear the slot rather than
+				// leaving a holster pointing at a weapon that cannot be drawn.
 				contents[slot] = "";
 				Console.Printf("RS_HOLSTER: %s no longer in inventory, slot cleared", stored);
 				return;
 			}
+
+			// MoveWeaponToHand is VOID and bails SILENTLY on a hand mismatch:
+			//     if (weap.bNoHandSwitch && weap.bOffhandWeapon != (hand == 1)) return;
+			// Every weapon in this arsenal carries +WEAPON.NOHANDSWITCH, and
+			// nothing binds a holster to a hand -- either hand can claim any of
+			// the six anchors, and the hip pair sit on opposite sides of the
+			// body. Without this check the store above was already committed, so
+			// reaching across with the wrong hand ATE the slot and delivered
+			// nothing: the weapon ended up in no holster and in no hand, and the
+			// console cheerfully printed a swap that never happened.
+			if (w.bNoHandSwitch && w.bOffhandWeapon != offhand)
+			{
+				contents[slot] = stored;   // roll back the commit above
+				Console.Printf("\cgRS_HOLSTER: %s belongs to the %s hand", stored, offhand ? "main" : "off");
+				return;
+			}
+
+			// Coming back out, so it is an ordinary auto-switch candidate again.
+			w.bNoAutoSwitchTo = w.Default.bNoAutoSwitchTo;
+
+			// MoveWeaponToHand, never a raw OffhandWeapon assignment.
+			// Assigning the pointer directly leaves the hand's psprite
+			// still running the OLD weapon's states with the new weapon as
+			// caller, and the VM aborts the moment one of those state
+			// functions type-checks its owner:
+			//   "Invalid class VR_Fist in function call to VR_SMG.StateFunction"
+			// This routes through PendingWeapon and DropWeapon/BringUpWeapon
+			// so the psprite is torn down and rebuilt properly.
+			moveWeaponInstant(pawn, w, hand);
 		}
 		else
 		{
@@ -897,12 +1195,52 @@ class RS_HolsterManager : EventHandler
 			// which is why storing a weapon appeared to do nothing at all --
 			// the gun went into the holster but never left the hand.
 			let fist = findFist(pawn, offhand);
-			if (fist != null)
-				pawn.MoveWeaponToHand(fist, offhand ? 1 : 0);
+			if (fist == null)
+			{
+				// No fist this hand can actually accept. Refusing loudly beats
+				// the old behaviour, which committed the store and then failed
+				// to empty the hand -- leaving the player still holding a gun
+				// the table had already filed away.
+				contents[slot] = stored;   // roll back; the store did not happen
+				Console.Printf("\cgRS_HOLSTER: no %s-hand fist to empty into", offhand ? "off" : "main");
+				return;
+			}
+			moveWeaponInstant(pawn, fist, hand);
 		}
+
+		// The gun that just went IN stops being an auto-switch candidate. A
+		// holstered weapon is still in inventory, so without this the engine's
+		// CheckWeaponSwitch picks it straight back out on the next ammo pickup
+		// (the fists it is compared against are +WEAPON.WIMPY_WEAPON, so the
+		// test always passes) -- and then the holster and the hand both claim
+		// the same gun. Restored on draw, above.
+		if (held != null && heldName != "")
+			held.bNoAutoSwitchTo = true;
+
+		// Charged only now that real work happened -- see the check at the top.
+		lastSwapTic[i] = level.time;
 
 		// Firmer and shorter than the entry tap -- a confirm, not a notice.
 		level.VRHaptic(offhand ? 1 : 0, 0.6, 15.0);
+
+		// Diegetic confirm, fired from the HOLSTER's own position rather than
+		// the player -- a sound with a place in the world, not a UI blip
+		// glued to your head. Two choices, both borrowed from RS_Main's own
+		// SNDINFO rather than new assets: rs_fx_holster (a $random 3-variant
+		// clunk that sat unused until now) or rs_allclear_ready (the
+		// ready-to-fire cadence beep, freed up for this now that
+		// rs_allclear_enable defaults off).
+		let sndCv = CVar.GetCVar("rs_holster_sound", pawn.player);
+		if (sndCv == null || sndCv.GetBool())
+		{
+			let styleCv = CVar.GetCVar("rs_holster_sound_style", pawn.player);
+			string sndName = (styleCv != null && styleCv.GetInt() == 1) ? "rs_allclear_ready" : "rs_fx_holster";
+
+			if (slot < props.Size() && props[slot] != null)
+				props[slot].A_StartSound(sndName, CHAN_AUTO, CHANF_DEFAULT, 0.7);
+			else
+				pawn.A_StartSound(sndName, CHAN_AUTO, CHANF_DEFAULT, 0.7);
+		}
 
 		string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
 		GetHolster(holsterIdx, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
@@ -1026,8 +1364,10 @@ class RS_HolsterManager : EventHandler
 
 		double finalRoll = edRoll[h] + RS_HolsterProp.holsterPropRoll() - rolOff;
 		bool foundWorld; double worldDX, worldDY, worldDZ;
+		double propScale = RS_HolsterProp.holsterPropScale();
 		[foundWorld, worldDX, worldDY, worldDZ] =
-			level.GetModelWorldOffset(w.GetClass(), rs.sprite, rs.Frame, stretch, finalAngle, finalPitch, finalRoll);
+			level.GetModelWorldOffset(w.GetClass(), rs.sprite, rs.Frame, stretch, finalAngle, finalPitch, finalRoll,
+			                          propScale, propScale);
 
 		Console.Printf("%-13s [%s]", hsName, stored);
 		Console.Printf("  orientation hint: found=%d mirrored=%d angOff=%.1f pitOff=%.1f rolOff=%.1f",

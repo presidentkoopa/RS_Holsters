@@ -26,3 +26,23 @@ user float rs_holster_prop_side = 0.0;
 // Yaw trim, plus the automatic mirror-flip and AngleOffset cancellation
 // (level.GetModelOrientationHint) applied ahead of it.
 user float rs_holster_prop_yaw = 0.0;
+
+// The store/draw confirm sound (RS_Holsters.zs doSwap).
+user bool rs_holster_sound = true;
+
+// Which sound plays: 0 = rs_fx_holster (the holster's own clunk, RS_Main
+// SNDINFO, previously unused), 1 = rs_allclear_ready (the AllClear
+// ready-to-fire beep, RS_Main RS_Weapon.zs -- same lump, different job).
+// AllClear defaults off now (RS_Main CVARINFO.txt, rs_allclear_enable) so
+// this is where that sound lives if you want it, without needing both.
+user int rs_holster_sound_style = 0;
+
+// Store/draw uses GZDoom's own CF_INSTANTWEAPSWITCH cheat flag (constants.zs),
+// set transiently around the MoveWeaponToHand call and restored right after
+// (RS_Holsters.zs, moveWeaponInstant) -- so ordinary weapon switching (number
+// keys, the wheel) is untouched, only a holster-triggered swap is instant.
+// Also what makes two-hand near-simultaneous store/draw work: with this on,
+// the whole lower-then-raise cycle resolves the same tic instead of over
+// ~16 tics, so there is no shared-PendingWeapon window for a second hand's
+// swap to collide with.
+user bool rs_holster_instant_switch = true;

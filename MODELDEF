@@ -1,15 +1,35 @@
 Model RS_HolsterMarker
 {
 	Path "models"
-	Model 0 "rs_wiresphere.obj"
+	Model 0 "rs_holster_bracket.obj"
 	Skin 0 "rs_wire_idle.png"
-	Model 1 "rs_wiresphere.obj"
+	Model 1 "rs_holster_bracket.obj"
 	Skin 1 "rs_wire_hot.png"
+	// Unit-radius mesh, same convention rs_wiresphere.obj used -- this Scale
+	// is what makes the reticle's true size match hsRadius exactly, the same
+	// "what you see is the actual volume" property the sphere had.
 	Scale 3.0 3.0 3.0
+
+	// FLAGS MUST PRECEDE THE FrameIndex LINES. Each FrameIndex immediately
+	// pushes a COPY of the in-progress model frame into the render table
+	// (r_data/models.cpp: SpriteModelFrames.Push(smf), inside the FrameIndex
+	// branch), capturing whatever flags are set AT THAT MOMENT. Flags written
+	// after the last FrameIndex mutate a template nothing reads again -- they
+	// parse without error and apply to nothing.
+	USEACTORPITCH
+	USEACTORROLL
+
+	// Idle spin, entirely engine-driven -- no per-tic script needed. The
+	// mesh is flat in its own local XY plane (every vertex z=0), so spinning
+	// around local Z keeps the whole reticle in-plane, like a rotating dial,
+	// rather than tumbling it out of the plane the player is meant to read it
+	// in. Speed 0.2 is a full turn roughly every 1000 tics (~28s at 35
+	// tics/sec) -- present, but not distracting.
+	Rotating
+	Rotation-Speed 0.2
+	Rotation-Vector 0 0 1
 
 	FrameIndex RSHM A 0 0
 	FrameIndex RSHM B 1 0
-	USEACTORPITCH
-	USEACTORROLL
 }
 

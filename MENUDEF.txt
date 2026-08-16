@@ -2,6 +2,12 @@
 // RS_Main's own submenu -- this pk3's menu presence should not depend on
 // RS_Main's menu structure, even though the holsters themselves still need
 // RS_Main's weapon classes loaded to have anything to show.
+OptionValue "RS_HolsterSoundStyle"
+{
+	0, "Holster clunk"
+	1, "Ready-to-fire beep"
+}
+
 AddOptionMenu "OptionsMenu"
 {
 	StaticText " "
@@ -28,6 +34,18 @@ OptionMenu "RS_HolsterOptions"
 	SafeCommand "Recalibrate standing height",             "netevent rs-holster-recalibrate"
 	StaticText " "
 
+	// A profile is the CURRENT edit-table -- tune it with Edit Mode above,
+	// then save it under whichever posture you tuned it for. Loading takes
+	// effect immediately; nothing here needs a rebuild or a relaunch.
+	StaticText "Profiles", "Gold"
+	SafeCommand "Save current as STANDING", "netevent rs-holster-save-standing"
+	SafeCommand "Load STANDING",            "netevent rs-holster-load-standing"
+	SafeCommand "Save current as SEATED",   "netevent rs-holster-save-seated"
+	SafeCommand "Load SEATED",              "netevent rs-holster-load-seated"
+	StaticText " "
+	SafeCommand "SWITCH seated/standing",   "netevent rs-holster-switch-profile"
+	StaticText " "
+
 	StaticText "Display", "Gold"
 	Option "Show holster spheres",      "rs_holster_props", "OnOff"
 	Slider "Stored weapon size",        "rs_holster_prop_scale", 0.05, 1.0, 0.01, 2
@@ -37,6 +55,19 @@ OptionMenu "RS_HolsterOptions"
 	Slider "Stored weapon up/down",     "rs_holster_prop_up",  -12.0, 12.0, 0.5, 1
 	Slider "Stored weapon fwd/back",    "rs_holster_prop_fwd", -12.0, 12.0, 0.5, 1
 	Slider "Stored weapon side",        "rs_holster_prop_side", -12.0, 12.0, 0.5, 1
+	StaticText " "
+
+	StaticText "Sound", "Gold"
+	Option "Store/draw confirm sound", "rs_holster_sound", "OnOff"
+	Option "Confirm sound style",      "rs_holster_sound_style", "RS_HolsterSoundStyle"
+	StaticText " "
+
+	StaticText "Timing", "Gold"
+	// Uses GZDoom's own instant-switch mechanism, scoped to just the swap a
+	// holster triggers -- number-key and wheel switching keep their normal
+	// animated speed either way. Off restores the real ~16-tic lower/raise
+	// and a longer debounce between store/draw presses.
+	Option "Instant store/draw", "rs_holster_instant_switch", "OnOff"
 	StaticText " "
 
 	StaticText "Grip", "Gold"

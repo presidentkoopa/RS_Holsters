@@ -36,3 +36,25 @@ alias rs_holster_table "netevent rs-holster-table"
 
 addmenukey "Holster: reset offsets" rs_holster_reset
 alias rs_holster_reset "netevent rs-holster-reset"
+
+// Profiles: the CURRENT edit table, saved under a posture name. No default
+// binds, same as edit/table/reset above -- these are setup-time actions, not
+// something you want a stray controller press triggering mid-game.
+addmenukey "Holster: save profile STANDING" rs_holster_save_standing
+alias rs_holster_save_standing "netevent rs-holster-save-standing"
+
+addmenukey "Holster: load profile STANDING" rs_holster_load_standing
+alias rs_holster_load_standing "netevent rs-holster-load-standing"
+
+addmenukey "Holster: save profile SEATED" rs_holster_save_seated
+alias rs_holster_save_seated "netevent rs-holster-save-seated"
+
+addmenukey "Holster: load profile SEATED" rs_holster_load_seated
+alias rs_holster_load_seated "netevent rs-holster-load-seated"
+
+// The switcher, unlike the four above, is meant for mid-session use -- you
+// just sat down or stood up -- so it is worth a real bind, not just a menu
+// entry. No default assigned; bind it yourself via Customize Controls to
+// whatever is free.
+addmenukey "Holster: SWITCH seated/standing" rs_holster_switch_profile
+alias rs_holster_switch_profile "netevent rs-holster-switch-profile"

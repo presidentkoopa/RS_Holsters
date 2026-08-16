@@ -79,7 +79,40 @@ class RS_HolsterMarker : Actor
 		// and A_ChangeModel is the mechanism already proven to work on the
 		// weapon props -- so use the one that is known good.
 		name skinWanted = hot ? 'rs_wire_hot.png' : 'rs_wire_idle.png';
-		A_ChangeModel('RS_HolsterMarker', 0, "models", 'rs_wiresphere.obj', 0, "models", skinWanted);
+		A_ChangeModel('RS_HolsterMarker', 0, "models", 'rs_holster_bracket.obj', 0, "models", skinWanted);
+	}
+
+	// 0 = no hand within sense range, 1 = hand exactly at the anchor. Fed by
+	// the manager every tic (RS_Holsters.zs updateProps) from the same
+	// hand-to-anchor distance updateClaims already computes for the claim
+	// radius -- this marker has no way to know a hand position on its own.
+	private double proximity01;
+
+	void SetProximity(double t)
+	{
+		proximity01 = (t < 0.0) ? 0.0 : (t > 1.0) ? 1.0 : t;
+	}
+
+	override void Tick()
+	{
+		Super.Tick();
+
+		// Tighten: brackets draw inward as a hand approaches. Actor Scale is
+		// a straight multiplier on top of MODELDEF's own Scale (RenderModel:
+		// scaleFactorX = actor->Scale.X * smf->xscale) -- the same mechanism
+		// RS_HolsterProp already uses to size the stored weapon, just driven
+		// by proximity here instead of a fixed cvar.
+		double s = 1.0 - (0.28 * proximity01);
+		Scale = (s, s);
+
+		// Pulse, hot state only -- a marker breathing at every holster all
+		// the time is noise the player has to learn to filter out, which
+		// defeats the point of a state cue. Idle stays flat at the base
+		// alpha; only the one you could actually reach right now moves.
+		if (isHot)
+			Alpha = 0.70 + 0.25 * sin(360.0 * ((level.time % 70) / 70.0));
+		else
+			Alpha = 0.85;
 	}
 }
 
@@ -141,11 +174,18 @@ class RS_HolsterProp : Actor
 	// Yaw offset applied to every stored weapon, and a separate 180 for
 	// main-hand weapons whose models are mirrored.
 	//
-	// This is a slider rather than a derived value because PITCH AND ROLL DO
-	// NOTHING: no weapon block in MODELDEF carries USEACTORPITCH/USEACTORROLL,
-	// so the renderer ignores those angles entirely and a model can only be
-	// turned about the vertical axis. Yaw is the only knob that exists, so it
-	// is the one you get to tune.
+	// This comment used to claim pitch and roll DO NOTHING and that yaw was the
+	// only axis the renderer honoured. That was never a property of the engine
+	// -- it was two stacked content bugs being mistaken for one. RenderModel
+	// applies yaw unconditionally but gates pitch on MDL_USEACTORPITCH and roll
+	// on MDL_USEACTORROLL, and neither flag was reaching the render table:
+	// first because the MODELDEF tokens sat AFTER their FrameIndex lines (each
+	// FrameIndex snapshots the flags set so far), and then, after that was
+	// fixed, because a backup file named MODELDEF.bak2 in the mod root
+	// registered under the same 8-character lump name "MODELDEF", parsed
+	// second, and won the frame lookup with its stale flagless entries.
+	// All three axes work. Keep this a slider anyway -- the right number is
+	// found by looking at it in the headset, not by reasoning about it.
 	static double holsterPropYaw()
 	{
 		let cv = CVar.GetCVar("rs_holster_prop_yaw", players[consoleplayer]);
