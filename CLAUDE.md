@@ -1,8 +1,9 @@
-# RS_Holsters — Handoff / Extension Guide
+# RS_Holsters — project context
 
-For whoever (including future-me) picks this system up to extend it. Not a
-user-facing doc — see README.md for that. This one assumes you're about to
-edit code.
+Claude Code auto-loads this file for any session opened in this repo — that
+is deliberate, not a rename of convenience. If you're a fresh agent reading
+this cold: this is the handoff doc, written so you don't have to rediscover
+any of it. Not a user-facing doc — see README.md for that.
 
 ## Architecture, in one picture
 
