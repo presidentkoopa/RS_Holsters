@@ -1,0 +1,25 @@
+// Holster anchor markers -- RS_HolsterMarker (RS_HolsterProp.zs).
+// Frame A is idle, frame B is "a hand is inside this holster's radius".
+// Offset is dead centre, not bottom-origin: these mark a point in space,
+// not something standing on the floor.
+//
+// The 3D wireframe sphere model (MODELDEF, rs_wiresphere.obj) is what
+// actually renders in-game -- these sprite entries are the fallback TEXTURES
+// needs to have SOMETHING bound to the RSHM sprite name before MODELDEF can
+// attach a model to it.
+
+Sprite "RSHMA0", 32, 32
+{
+	Offset 16, 16
+	XScale 10.6
+	YScale 10.6
+	Patch "rshma0", 0, 0
+}
+
+Sprite "RSHMB0", 32, 32
+{
+	Offset 16, 16
+	XScale 10.6
+	YScale 10.6
+	Patch "rshmb0", 0, 0
+}

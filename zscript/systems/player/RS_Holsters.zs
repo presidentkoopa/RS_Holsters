@@ -1,0 +1,1019 @@
+// Body-anchored holsters: calibration + anchor placement + grip-claim
+// arbitration. This is the part that actually DRIVES the engine's
+// HolsterClaimMain/HolsterClaimOff -- without this handler running, those
+// fields stay false, the native grip redirect never fires, and grip keeps its
+// normal meaning everywhere (see DoomXR vk_openxrdevice.cpp).
+//
+// Anchors are computed from HmdPos and HmdYaw ONLY -- never HmdPitch/Roll.
+// That is deliberate: pitch/roll come from looking up or down, and a holster
+// anchored to full head orientation would swing away from the body every time
+// the player looked at it. Yaw is the only rotation a real hip or shoulder
+// actually follows.
+//
+// Calibration is one sample of standing eye height above the floor, not a menu
+// flow. Every anchor height is a FRACTION of that number, so a 5'2" and a 6'4"
+// player both get anchors on their own body rather than at some fixed offset
+// tuned for one height.
+//
+// NOTE ON SHAPE: the holster table is an indexed accessor rather than an
+// Array of structs, because ZScript dynamic arrays only accept integral and
+// object types -- Array<SomeStruct> does not compile. Since the table is
+// compile-time constant anyway, a switch costs nothing and allocates nothing.
+//
+// Scope: this owns calibration, anchors, and claims. It does not yet spawn
+// holster props -- that is the next piece.
+
+class RS_HolsterManager : EventHandler
+{
+	const HOLSTER_COUNT = 6;
+
+	// Doom's player scale puts a map unit at roughly one real inch (player
+	// radius 16 ~ a person's half shoulder width), so these read as inches.
+	//
+	//   hsFwd    + is in FRONT of the eye plane, - is behind
+	//   hsSide   + is the player's right
+	//   hsFrac   height as a fraction of calibrated standing EYE height
+	//   hsRadius grab radius, map units
+	//
+	// Everything is measured from the headset, which sits at your eyes -- the
+	// FRONT of your head. That is why almost every hsFwd here is negative:
+	// your chest, your back and your hips are all behind your own eyes. An
+	// anchor at +fwd would float in front of your face.
+	//
+	// Heights are fractions of EYE height, not total height. Eye height is
+	// about 0.93 of a person's stature, so these do not match the more
+	// familiar stature-based proportions: shoulder is ~0.82 of stature but
+	// ~0.88 of eye height.
+	//
+	// Front/back pairs are the tight ones -- a torso is only ~9-10 inches
+	// deep, so pectoral and shoulderblade anchors are close enough that
+	// oversized radii would overlap. They stay separable in practice because
+	// the hand approaches a pectoral from the front and a blade from over the
+	// shoulder, never from the same direction.
+	// Hips only for now. The chest and shoulderblade anchors are removed
+	// rather than commented out -- two working holsters beat six that get in
+	// each other's way while the placement is still being tuned.
+	//
+	// Radius 3.0 = a 6 INCH WIDE catch volume. The marker sphere is drawn at
+	// exactly this radius (MODELDEF Scale must match), so what you see is the
+	// actual volume, not a decorative shell around it.
+	// Orientation is PER HOLSTER, not global: a hip wants a gun hanging
+	// barrel-down while a pectoral wants one lying flat across the chest at an
+	// angle. One shared set of angles cannot serve both, so pitch/yaw/roll ride
+	// in the table alongside position and are captured the same way -- from
+	// your hand, in edit mode.
+	static void GetHolster(int idx, out string hsName, out double hsFwd, out double hsSide, out double hsFrac, out double hsRadius,
+	                       out double hsPitch, out double hsYaw, out double hsRoll)
+	{
+		// sensible starting angles; every one of these is meant to be dragged
+		hsPitch = 90.0; hsYaw = 0.0; hsRoll = 0.0;
+
+		switch (idx)
+		{
+			// Hips: barrel straight down, the way a sidearm hangs.
+			case 0:
+				hsName = "HipLeft";   hsFwd = -2.0; hsSide = -9.0; hsFrac = 0.57; hsRadius = 3.0; break;
+			case 1:
+				hsName = "HipRight";  hsFwd = -2.0; hsSide =  9.0; hsFrac = 0.57; hsRadius = 3.0; break;
+
+			// Head-side pair. TEMPORARILY PLACED IN FRONT (positive hsFwd) so
+			// they are actually visible while being set up -- at their real
+			// position beside the ears they sit in peripheral vision, which
+			// makes them impossible to aim a hand at or confirm by eye.
+			// Drag them back beside the head in edit mode once they work;
+			// roughly hsFwd -2, hsSide +/-8 is where they belong.
+			case 2:
+				hsName = "HeadLeft";  hsFwd = 7.0; hsSide = -10.0; hsFrac = 0.95; hsRadius = 3.0; break;
+			case 3:
+				hsName = "HeadRight"; hsFwd = 7.0; hsSide =  10.0; hsFrac = 0.95; hsRadius = 3.0; break;
+
+			// Pectorals: pistols and SMGs, lying flat against the chest,
+			// angled down and outward rather than hanging vertically. Yaw
+			// splits left/right so each points away from the centreline.
+			// Barrel down, same as everything else -- no per-holster angle
+			// worth the complexity right now. hsPitch/hsYaw/hsRoll default to
+			// 90/0/0 at the top of this function already.
+			case 4:
+				hsName = "PectoralLeft";  hsFwd = -1.0; hsSide = -6.0; hsFrac = 0.78; hsRadius = 3.0; break;
+			default:
+				hsName = "PectoralRight"; hsFwd = -1.0; hsSide =  6.0; hsFrac = 0.78; hsRadius = 3.0; break;
+		}
+	}
+
+	// Keyed by player number rather than stored on the pawn: pawns are
+	// destroyed and replaced on death and hub travel, and the calibration
+	// measurement should not have to be retaken every time that happens.
+	double eyeHeight[MAXPLAYERS];
+	bool   calibrated[MAXPLAYERS];
+	int    spawnTries[MAXPLAYERS];
+
+	// Which holster each hand is currently inside, -1 for none. Recorded
+	// during the claim pass so the swap acts on the holster the hand was in
+	// at the moment of the grip press, rather than re-testing a tic later.
+	int nearMain[MAXPLAYERS];
+	int nearOff[MAXPLAYERS];
+
+	// Contents by holster index, flattened to one array because ZScript has
+	// no 2D dynamic arrays: index as (player * HOLSTER_COUNT + holster).
+	// Empty string means the holster holds nothing, which reads to the player
+	// as holding fists -- the fist is never stored, it is what empty looks like.
+	Array<string> contents;
+
+	// Per hand (player * 2 + offhand), the tic a swap last happened.
+	int lastSwapTic[MAXPLAYERS * 2];
+
+	// One prop per holster per player, flattened like contents. Held as
+	// pointers so a destroyed prop (level change, player death) reads null and
+	// gets respawned rather than leaving a dangling anchor.
+	Array<RS_HolsterProp> props;
+	Array<RS_HolsterMarker> markers;
+
+	// ---- live offsets ----
+	// The switch in GetHolster is the DEFAULT table; these are what anchorPos
+	// actually reads, seeded from it once. Edit mode writes here, so a holster
+	// can be dragged to where it belongs on a real body instead of being
+	// guessed at from proportion tables. Not per-player: this is a tuning
+	// surface for one person wearing the headset, not gameplay state.
+	double edFwd[HOLSTER_COUNT];
+	double edSide[HOLSTER_COUNT];
+	double edFrac[HOLSTER_COUNT];
+	// Orientation lives here too, so a hip and a pectoral can hold a weapon at
+	// completely different angles. Captured from the hand while dragging: point
+	// your hand the way the gun should sit and drop it.
+	double edPitch[HOLSTER_COUNT];
+	double edYaw[HOLSTER_COUNT];
+	double edRoll[HOLSTER_COUNT];
+	bool   edInit;
+
+	bool editMode;
+	int  grabbedMain;  // holster index being dragged, -1 for none
+	int  grabbedOff;
+
+	// ---- body yaw ----
+	// Anchors follow THIS, not HmdYaw directly. Your hips do not counter-rotate
+	// every time you glance sideways, and neither should a holster: driving
+	// them straight off head yaw means a head shake whips them around the body.
+	//
+	// Two separate defences, because there are two separate problems:
+	//
+	//  1. NECK RANGE. Within +/- BODY_YAW_DEADZONE of where the body faces,
+	//     head rotation moves nothing at all. That is a real person turning
+	//     their head without turning their torso.
+	//  2. PITCH DEGENERACY. Yaw stops meaning anything useful when you look
+	//     near-vertical -- at straight down, a tiny head movement swings yaw
+	//     wildly. Past BODY_YAW_MAX_PITCH the body simply stops tracking, which
+	//     is the specific fix for "look down and shake, holsters go bananas".
+	double bodyYaw[MAXPLAYERS];
+	bool   bodyYawInit[MAXPLAYERS];
+	// Last seen controller-turn total, to difference against. Tracked rather
+	// than read absolutely because only the CHANGE should move the body.
+	double lastTurnYaw[MAXPLAYERS];
+
+	const BODY_YAW_DEADZONE  = 50.0;  // degrees of free head turn
+	const BODY_YAW_FOLLOW    = 0.15;  // catch-up rate past the deadzone
+	const BODY_YAW_MAX_PITCH = 55.0;  // stop tracking beyond this head pitch
+
+	const SWAP_COOLDOWN = 12;       // tics; also covers PendingWeapon settling
+	const CLAIM_HYSTERESIS = 1.4;   // exit radius multiplier; see updateClaims
+	const CALIBRATE_MAX_TRIES = 35; // ~1 second, then stop rather than loop forever
+	const EYE_MIN = 36.0;           // sanity floor, map units (~3 feet)
+	const EYE_MAX = 96.0;           // sanity ceiling (~8 feet)
+
+	override void WorldTick()
+	{
+		for (int i = 0; i < MAXPLAYERS; ++i)
+		{
+			if (!playeringame[i] || players[i].mo == null)
+				continue;
+
+			PlayerPawn pawn = players[i].mo;
+
+			if (!calibrated[i])
+			{
+				tryCalibrate(i, pawn);
+				continue; // no anchors, no claims, until calibration lands
+			}
+
+			updateBodyYaw(i, pawn);
+			updateGrabs(i, pawn);
+			updateClaims(i, pawn);
+		}
+	}
+
+	// One-shot sample of standing eye height. Retried rather than taken
+	// immediately because the pawn can still be mid-drop on its first tics,
+	// and because HmdPos reads as a zero vector until the VR backend has
+	// written a pose at least once.
+	private void tryCalibrate(int i, PlayerPawn pawn)
+	{
+		spawnTries[i]++;
+		if (spawnTries[i] > CALIBRATE_MAX_TRIES)
+		{
+			// Never got a plausible reading. Fall back to the pawn's own
+			// height so holsters still exist, rather than silently doing
+			// nothing forever with no indication why.
+			eyeHeight[i] = pawn.Height * 0.9;
+			calibrated[i] = true;
+			Console.Printf("RS_HOLSTER: calibration timed out, using fallback eye height %.1f", eyeHeight[i]);
+			return;
+		}
+
+		// A zero HmdPos means the VR backend has not written a head pose into
+		// the field yet -- distinct from "the player is standing somewhere
+		// implausible". Called out separately because it is the failure that
+		// looks identical to "nothing is happening" from the outside.
+		if (pawn.HmdPos.Length() == 0)
+		{
+			if (spawnTries[i] == CALIBRATE_MAX_TRIES)
+				Console.Printf("\cgRS_HOLSTER: HmdPos is zero -- engine is not writing head pose. Holsters cannot work.");
+			return;
+		}
+
+		double measured = pawn.HmdPos.Z - pawn.floorz;
+		if (measured < EYE_MIN || measured > EYE_MAX)
+		{
+			if (spawnTries[i] == CALIBRATE_MAX_TRIES)
+				Console.Printf("\cgRS_HOLSTER: eye height %.1f outside sane range %.0f-%.0f (HmdPos.Z %.1f, floor %.1f)",
+					measured, EYE_MIN, EYE_MAX, pawn.HmdPos.Z, pawn.floorz);
+			return;
+		}
+
+		eyeHeight[i] = measured;
+		calibrated[i] = true;
+		Console.Printf("RS_HOLSTER: calibrated standing eye height %.1f map units", measured);
+	}
+
+	// For a bindable recalibrate command (sat down during the auto sample,
+	// playspace floor changed).
+	void ForceRecalibrate(int playerNum)
+	{
+		if (playerNum < 0 || playerNum >= MAXPLAYERS)
+			return;
+		calibrated[playerNum] = false;
+		spawnTries[playerNum] = 0;
+	}
+
+	// Seed the live offsets from the default table, once.
+	private void ensureEdit()
+	{
+		if (edInit)
+			return;
+		edInit = true;
+		grabbedMain = -1;
+		grabbedOff = -1;
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+			edFwd[h] = hsFwd;
+			edSide[h] = hsSide;
+			edFrac[h] = hsFrac;
+			edPitch[h] = hsPitch;
+			edYaw[h] = hsYaw;
+			edRoll[h] = hsRoll;
+		}
+	}
+
+	// Advance the body's facing toward the head's, the way a torso actually
+	// follows a neck. Called once per tic, before anchors are computed.
+	private void updateBodyYaw(int i, PlayerPawn pawn)
+	{
+		if (!bodyYawInit[i])
+		{
+			bodyYawInit[i] = true;
+			bodyYaw[i] = pawn.HmdYaw;
+			lastTurnYaw[i] = pawn.VRTurnYaw;
+			return;
+		}
+
+		// CONTROLLER TURN MOVES THE BODY 1:1, no deadzone, no smoothing.
+		//
+		// Snap turn and stick turn rotate the whole virtual body -- your hips
+		// went with it, because nothing physical happened at all. Feeding that
+		// through the neck deadzone was the drift: a 45 degree snap fits inside
+		// a 50 degree deadzone, so the body refused to follow, and every snap
+		// left the holsters a little further behind where the body actually
+		// faced. It never recovered because each snap was individually "within
+		// neck range".
+		double turnDelta = normalizeDeg(pawn.VRTurnYaw - lastTurnYaw[i]);
+		lastTurnYaw[i] = pawn.VRTurnYaw;
+		if (turnDelta != 0)
+			bodyYaw[i] = normalizeDeg(bodyYaw[i] + turnDelta);
+
+		// Yaw is meaningless near-vertical: looking straight down, a small head
+		// movement swings it wildly. Freeze rather than chase the noise.
+		if (abs(pawn.HmdPitch) > BODY_YAW_MAX_PITCH)
+			return;
+
+		// Shortest signed difference, written out by hand -- deltaangle() is
+		// not callable as a free function from a plain Object like this one.
+		double d = pawn.HmdYaw - bodyYaw[i];
+		while (d >  180.0) { d -= 360.0; }
+		while (d < -180.0) { d += 360.0; }
+
+		// Inside the neck's range the body does not move at all. This is what
+		// makes a head shake cost nothing.
+		if (abs(d) <= BODY_YAW_DEADZONE)
+			return;
+
+		// Past it, follow only the EXCESS, and only partway per tic, so the
+		// body eases around instead of snapping.
+		double excess = (d > 0) ? (d - BODY_YAW_DEADZONE) : (d + BODY_YAW_DEADZONE);
+		bodyYaw[i] += excess * BODY_YAW_FOLLOW;
+
+		while (bodyYaw[i] >  360.0) { bodyYaw[i] -= 360.0; }
+		while (bodyYaw[i] < -360.0) { bodyYaw[i] += 360.0; }
+	}
+
+	// World-space position of one holster anchor for this player.
+	private Vector3 anchorPos(int i, PlayerPawn pawn, int idx)
+	{
+		ensureEdit();
+
+		// bodyYaw, NOT HmdYaw: anchors hang off the torso's facing so they do
+		// not whip around when the head turns. ZScript's cos/sin take DEGREES.
+		double yaw = bodyYaw[i];
+		double fx = cos(yaw), fy = sin(yaw);   // forward vector
+		double rx = sin(yaw), ry = -cos(yaw);  // player's right: yaw - 90 degrees
+
+		double floorZ = pawn.HmdPos.Z - eyeHeight[i];
+
+		return (
+			pawn.HmdPos.X + (edFwd[idx] * fx) + (edSide[idx] * rx),
+			pawn.HmdPos.Y + (edFwd[idx] * fy) + (edSide[idx] * ry),
+			floorZ + (eyeHeight[i] * edFrac[idx])
+		);
+	}
+
+	// The inverse of anchorPos: take a world point (a hand) and express it in
+	// the same body-local numbers the table uses. This is what makes edit mode
+	// work -- drag a sphere to where it belongs and read the offsets straight
+	// back out, rather than deriving them from proportions and hoping.
+	private void worldToBody(int i, PlayerPawn pawn, Vector3 world, out double oFwd, out double oSide, out double oFrac)
+	{
+		// Same frame anchorPos uses -- bodyYaw, not HmdYaw. Mixing the two
+		// would make a dragged holster land somewhere other than the hand.
+		double yaw = bodyYaw[i];
+		double fx = cos(yaw), fy = sin(yaw);
+		double rx = sin(yaw), ry = -cos(yaw);
+
+		double dx = world.X - pawn.HmdPos.X;
+		double dy = world.Y - pawn.HmdPos.Y;
+
+		oFwd  = (dx * fx) + (dy * fy);
+		oSide = (dx * rx) + (dy * ry);
+
+		double floorZ = pawn.HmdPos.Z - eyeHeight[i];
+		oFrac = (eyeHeight[i] != 0) ? ((world.Z - floorZ) / eyeHeight[i]) : 0.0;
+	}
+
+	// While a holster is grabbed, it simply lives wherever that hand is.
+	private void updateGrabs(int i, PlayerPawn pawn)
+	{
+		// Position AND orientation follow the hand, so a holster is placed the
+		// way you would actually place one: hold your hand where the gun goes,
+		// angled how the gun should sit, and let go.
+		if (grabbedMain >= 0)
+		{
+			worldToBody(i, pawn, pawn.AttackPos, edFwd[grabbedMain], edSide[grabbedMain], edFrac[grabbedMain]);
+			edPitch[grabbedMain] = pawn.AttackPitch;
+			edRoll[grabbedMain]  = pawn.AttackRoll;
+			// yaw relative to the BODY, not the world, or the stored angle
+			// would only be right while facing the direction you set it in
+			edYaw[grabbedMain] = normalizeDeg(pawn.AttackAngle - bodyYaw[i]);
+		}
+		if (grabbedOff >= 0)
+		{
+			worldToBody(i, pawn, pawn.OffhandPos, edFwd[grabbedOff], edSide[grabbedOff], edFrac[grabbedOff]);
+			edPitch[grabbedOff] = pawn.OffhandPitch;
+			edRoll[grabbedOff]  = pawn.OffhandRoll;
+			edYaw[grabbedOff] = normalizeDeg(pawn.OffhandAngle - bodyYaw[i]);
+		}
+	}
+
+	private static double normalizeDeg(double d)
+	{
+		while (d >  180.0) { d -= 360.0; }
+		while (d < -180.0) { d += 360.0; }
+		return d;
+	}
+
+	// Prints the live table as a ready-to-paste replacement for GetHolster's
+	// switch. The whole point of edit mode: tune it on a body, then bake it.
+	private void dumpTable()
+	{
+		Console.Printf("\c[Gold]--- RS_HOLSTER TABLE (paste over GetHolster's switch) ---");
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+			Console.Printf("case %d: hsName = \"%s\"; hsFwd = %.2f; hsSide = %.2f; hsFrac = %.3f; hsRadius = %.1f; hsPitch = %.1f; hsYaw = %.1f; hsRoll = %.1f; break;",
+				h, hsName, edFwd[h], edSide[h], edFrac[h], hsRadius, edPitch[h], edYaw[h], edRoll[h]);
+		}
+	}
+
+	private void updateClaims(int i, PlayerPawn pawn)
+	{
+		// Hysteresis: a hand already inside a holster keeps it until it leaves
+		// a LARGER radius than it took to get in. Without this, a hand resting
+		// near the boundary flickers claimed/unclaimed many times a second --
+		// which is worse than not claiming at all, because grip's MEANING
+		// flips with it, and the player cannot tell what a press will do.
+		int prevMain = nearMain[i];
+		int prevOff  = nearOff[i];
+
+		bool mainClaimed = false;
+		bool offClaimed = false;
+		nearMain[i] = -1;
+		nearOff[i] = -1;
+
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+
+			Vector3 anchor = anchorPos(i, pawn, h);
+
+			double mainR = (prevMain == h) ? hsRadius * CLAIM_HYSTERESIS : hsRadius;
+			double offR  = (prevOff  == h) ? hsRadius * CLAIM_HYSTERESIS : hsRadius;
+
+			if (!mainClaimed && (pawn.AttackPos - anchor).Length() < mainR)
+			{
+				mainClaimed = true;
+				nearMain[i] = h;
+			}
+			if (!offClaimed && (pawn.OffhandPos - anchor).Length() < offR)
+			{
+				offClaimed = true;
+				nearOff[i] = h;
+			}
+		}
+
+		// Edge-logged rather than per-tic: this is the signal that the whole
+		// chain works, and it should be visible without being a spam source.
+		if (mainClaimed != pawn.HolsterClaimMain)
+		{
+			Console.Printf("RS_HOLSTER: main hand %s holster range", mainClaimed ? "ENTERED" : "left");
+			// A short, light tap on ENTER only -- a real holster does not buzz
+			// your hand when you pull away from it, only when you find it.
+			if (mainClaimed) level.VRHaptic(0, 0.35, 25.0);
+		}
+		if (offClaimed != pawn.HolsterClaimOff)
+		{
+			Console.Printf("RS_HOLSTER: off hand %s holster range", offClaimed ? "ENTERED" : "left");
+			if (offClaimed) level.VRHaptic(1, 0.35, 25.0);
+		}
+
+		pawn.HolsterClaimMain = mainClaimed;
+		pawn.HolsterClaimOff  = offClaimed;
+
+		updateProps(i, pawn);
+	}
+
+	// Park a prop at every anchor and keep it showing whatever is stored there.
+	// Position is rewritten each tic rather than parented, because the anchors
+	// move with the player's head every frame and there is nothing to parent to.
+	private void updateProps(int i, PlayerPawn pawn)
+	{
+		if (!showProps())
+		{
+			// Setting invisible rather than destroying: the player can toggle
+			// this mid-session, and respawning six actors on every toggle is
+			// worse than leaving six invisible ones parked.
+			for (int h = 0; h < HOLSTER_COUNT; ++h)
+			{
+				int pi = (i * HOLSTER_COUNT) + h;
+				if (pi < props.Size() && props[pi] != null)
+					props[pi].bINVISIBLE = true;
+			}
+			return;
+		}
+
+		ensureContents();
+		ensureProps();
+
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			int pi = (i * HOLSTER_COUNT) + h;
+			Vector3 at = anchorPos(i, pawn, h);
+
+			// --- the ring marker: always present, so an empty holster is
+			// still something the player can see and aim a hand at ---
+			if (markers[pi] == null)
+				markers[pi] = RS_HolsterMarker(Actor.Spawn("RS_HolsterMarker", at, NO_REPLACE));
+
+			if (markers[pi] != null)
+			{
+				markers[pi].bINVISIBLE = false;
+				markers[pi].SetOrigin(at, true);
+				markers[pi].SetHot(nearMain[i] == h || nearOff[i] == h);
+			}
+
+			// --- the stored weapon's model, when there is one ---
+			if (props[pi] == null)
+			{
+				props[pi] = RS_HolsterProp(Actor.Spawn("RS_HolsterProp", at, NO_REPLACE));
+				if (props[pi] == null)
+					continue;
+			}
+
+			let p = props[pi];
+
+			string stored = contents[(i * HOLSTER_COUNT) + h];
+			// Show first: it reads level.GetModelOrientationHint, which the
+			// angle below depends on.
+			p.ShowWeapon(stored == "" ? null : Weapon(pawn.FindInventory(stored)));
+
+			// Face the same way the BODY does (not the head), so a holstered
+			// gun stays put on the hip when you look around, plus a tunable
+			// yaw, MEASURED mirroring, and cancellation of whatever that
+			// specific model bakes into its own MODELDEF block.
+			//
+			// Mirroring (p.mirrored) comes from level.GetModelOrientationHint,
+			// not a guess: it is true exactly when that weapon's own Scale has
+			// a negative X, which is a per-model authoring choice uncorrelated
+			// with which hand it is normally held in. A mirrored mesh points
+			// the opposite way for the same actor angle, hence +180.
+			//
+			// bakedAngleOffset/PitchOffset/RollOffset are MODELDEF fields
+			// (e.g. the SMG's PitchOffset 45) that the renderer applies AFTER
+			// actor rotation (r_data/models.cpp, step 5 follows step 1) --
+			// so they land on top of whatever pitch/angle/roll is set here
+			// REGARDLESS of what this code does. Subtracting them cancels
+			// that per-weapon quirk out, so every weapon ends up at the same
+			// intended final orientation instead of each carrying its own
+			// baked-in deviation. Exact for the common case here, where a
+			// weapon bakes at most one of the three axes; a weapon baking two
+			// or more non-commuting axes at once would need real matrix math
+			// to cancel exactly, which none of the current data requires.
+			double byaw = bodyYaw[i];
+			double extra = RS_HolsterProp.holsterPropYaw() + edYaw[h];
+			if (p.mirrored)
+				extra += 180.0;
+			double finalAngle = byaw + extra - p.bakedAngleOffset;
+			double finalPitch = edPitch[h] + RS_HolsterProp.holsterPropPitch() - p.bakedPitchOffset;
+
+			p.angle = finalAngle;
+			p.pitch = finalPitch;
+			p.roll  = edRoll[h] + RS_HolsterProp.holsterPropRoll() - p.bakedRollOffset;
+
+			// Centring nudge, in the MESH'S OWN rotated frame -- not a flat body
+			// frame. Checked against engine source rather than assumed:
+			// RenderModel (r_data/models.cpp) applies a weapon's MODELDEF
+			// Offset AFTER actor rotation (step 4 follows step 1), so the
+			// offset is expressed in the model's own rotated local axes. A
+			// fixed body-frame trim can only line up for one specific pitch --
+			// which is exactly the "sits outside and in front" bug once pitch
+			// stopped being a flat 90 for every holster. Deriving the nudge
+			// from the SAME angle/pitch just assigned keeps it correct
+			// regardless of how any given holster is oriented.
+			double localFwdX =  cos(finalAngle) * cos(finalPitch);
+			double localFwdY =  sin(finalAngle) * cos(finalPitch);
+			double localFwdZ = -sin(finalPitch);
+			double localUpX  = -cos(finalAngle) * sin(finalPitch);
+			double localUpY  = -sin(finalAngle) * sin(finalPitch);
+			double localUpZ  = -cos(finalPitch);
+			// Third axis of the same basis, yaw-only (matches hsSide's own
+			// convention elsewhere in this file: rx=sin(yaw), ry=-cos(yaw)).
+			// Roll is not folded in here; every holster's roll is currently 0,
+			// so this is exact for the data that exists, not for the general
+			// case -- same honest limit as the rotation-offset cancellation.
+			double rightX = sin(finalAngle);
+			double rightY = -cos(finalAngle);
+
+			// AUTOMATIC centering: the model's own baked position offset
+			// (level.GetModelOffsetHint, read in RS_HolsterProp.ShowWeapon),
+			// rotated into world space by the SAME basis the actor is oriented
+			// with, then subtracted -- so the mesh, which the renderer will
+			// displace by this exact vector once it applies the actor's own
+			// rotation, lands back at the sphere centre instead of wherever its
+			// raw MODELDEF Offset happens to push it. This is the actual fix
+			// for centering; a manual slider defaulting to zero was never a
+			// fix, it was an unset correction nobody had reason to know about.
+			//
+			// Axis mapping (Doom-local X/Y/Z from GetModelOffsetHint -> this
+			// basis) is X=forward, Y=right, Z=up, matching how those axes
+			// behave for an unrotated Doom actor. Not verified in-engine --
+			// the manual trim sliders below stay live as a recovery path if
+			// this mapping or a sign turns out wrong for some model.
+			double worldOffX = (p.bakedOffX * localFwdX) + (p.bakedOffY * rightX) + (p.bakedOffZ * localUpX);
+			double worldOffY = (p.bakedOffX * localFwdY) + (p.bakedOffY * rightY) + (p.bakedOffZ * localUpY);
+			double worldOffZ = (p.bakedOffX * localFwdZ)                          + (p.bakedOffZ * localUpZ);
+
+			// Manual trim, same rotated frame, on top of the automatic
+			// correction -- a residual nudge now, not the whole mechanism.
+			double nUp   = RS_HolsterProp.holsterPropUp();
+			double nFwd  = RS_HolsterProp.holsterPropFwd();
+			double nSide = RS_HolsterProp.holsterPropSide();
+
+			Vector3 placed = (
+				at.X - worldOffX + (nFwd * localFwdX) + (nUp * localUpX) + (nSide * rightX),
+				at.Y - worldOffY + (nFwd * localFwdY) + (nUp * localUpY) + (nSide * rightY),
+				at.Z - worldOffZ + (nFwd * localFwdZ) + (nUp * localUpZ)
+			);
+			p.SetOrigin(placed, true);
+		}
+	}
+
+	// Grab the sphere this hand is inside, or drop the one it is holding.
+	private void toggleGrab(int i, bool mainHand)
+	{
+		ensureEdit();
+
+		int held = mainHand ? grabbedMain : grabbedOff;
+		if (held >= 0)
+		{
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(held, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+			Console.Printf("RS_HOLSTER: dropped %s at fwd %.2f  side %.2f  frac %.3f",
+				hsName, edFwd[held], edSide[held], edFrac[held]);
+			level.VRHaptic(mainHand ? 0 : 1, 0.6, 15.0);
+			if (mainHand) { grabbedMain = -1; } else { grabbedOff = -1; }
+			return;
+		}
+
+		// Nothing held -- grab whatever this hand is inside. While editing,
+		// the claim radius is what decides, same as a real grab, so a sphere
+		// you cannot claim is also a sphere you cannot drag: that is the
+		// feedback, not a limitation.
+		int want = mainHand ? nearMain[i] : nearOff[i];
+		if (want < 0)
+		{
+			Console.Printf("RS_HOLSTER: no sphere in reach for that hand");
+			return;
+		}
+
+		string hsName2; double f2, s2, fr2, r2, p2, y2, rl2;
+		GetHolster(want, hsName2, f2, s2, fr2, r2, p2, y2, rl2);
+		Console.Printf("RS_HOLSTER: grabbed %s -- move your hand, press again to drop", hsName2);
+		level.VRHaptic(mainHand ? 0 : 1, 0.35, 25.0);
+		if (mainHand) { grabbedMain = want; } else { grabbedOff = want; }
+	}
+
+	// Whatever this player's melee weapon actually is. Walks inventory rather
+	// than naming a class, so it survives new player classes and new fist
+	// variants without edits here.
+	// Must return a fist that ALREADY belongs to the hand being filled.
+	// MoveWeaponToHand's first guard is:
+	//     if (weap.bNoHandSwitch && weap.bOffhandWeapon != (hand == 1)) return;
+	// and every fist here carries +WEAPON.NOHANDSWITCH -- so handing it the
+	// main-hand fist for the off hand makes it bail SILENTLY. That was the
+	// "offhand never lets go of the gun" bug: the store happened, the hand
+	// was never emptied, and nothing reported a failure.
+	// One definition of "is this a fist", used by both the store guard and the
+	// fist lookup. Name-based on purpose -- see the note at the store guard.
+	static bool isFistClass(string cn)
+	{
+		return cn.IndexOf("Fist") >= 0;
+	}
+
+	private Weapon findFist(PlayerPawn pawn, bool offhand) const
+	{
+		Weapon anyFist = null;
+		for (Inventory item = pawn.Inv; item != null; item = item.Inv)
+		{
+			let w = Weapon(item);
+			if (w == null)
+				continue;
+			// GetClassName() is a Name; IndexOf is a String method, so it has
+			// to land in a string first.
+			string cn = w.GetClassName();
+			if (cn.IndexOf("Fist") < 0)
+				continue;
+
+			if (w.bOffhandWeapon == offhand)
+				return w;      // the one that belongs in this hand
+			if (anyFist == null)
+				anyFist = w;   // fallback if the matching one is not owned
+		}
+		return anyFist;
+	}
+
+	private void ensureProps()
+	{
+		int want = MAXPLAYERS * HOLSTER_COUNT;
+		while (props.Size() < want)
+			props.Push(null);
+		while (markers.Size() < want)
+			markers.Push(null);
+	}
+
+	private bool showProps() const
+	{
+		let cv = CVar.GetCVar("rs_holster_props", players[consoleplayer]);
+		return (cv != null) ? cv.GetBool() : true;
+	}
+
+	override void NetworkProcess(ConsoleEvent evt)
+	{
+		if (evt.player < 0) return;
+		PlayerPawn pawn = players[evt.player].mo;
+		if (!pawn) return;
+
+		if (evt.name == "rs-holster-recalibrate")
+		{
+			ForceRecalibrate(evt.player);
+			return;
+		}
+
+		if (evt.name == "rs-holster-debug")
+		{
+			dumpDebug(evt.player, pawn);
+			return;
+		}
+
+		if (evt.name == "rs-holster-edit")
+		{
+			ensureEdit();
+			editMode = !editMode;
+			grabbedMain = -1;
+			grabbedOff = -1;
+			if (editMode)
+			{
+				Console.Printf("\c[Gold]RS_HOLSTER: EDIT MODE ON");
+				Console.Printf("  put a hand in a sphere and press its holster key to GRAB it");
+				Console.Printf("  move your hand, press again to DROP it there");
+				Console.Printf("  then: netevent rs-holster-table   (prints the numbers)");
+			}
+			else
+			{
+				Console.Printf("\c[Gold]RS_HOLSTER: edit mode off");
+			}
+			return;
+		}
+
+		if (evt.name == "rs-holster-table")
+		{
+			ensureEdit();
+			dumpTable();
+			return;
+		}
+
+		if (evt.name == "rs-holster-reset")
+		{
+			edInit = false;
+			ensureEdit();
+			Console.Printf("RS_HOLSTER: offsets reset to the built-in defaults");
+			return;
+		}
+
+		// One key per hand -- which hand pressed decides which weapon moves,
+		// or in edit mode which sphere gets dragged.
+		if (evt.name == "rs-holster-grab-main")
+		{
+			if (editMode) { toggleGrab(evt.player, true); }
+			else          { doSwap(evt.player, pawn, nearMain[evt.player], false); }
+		}
+		else if (evt.name == "rs-holster-grab-off")
+		{
+			if (editMode) { toggleGrab(evt.player, false); }
+			else          { doSwap(evt.player, pawn, nearOff[evt.player], true); }
+		}
+	}
+
+	// Swap what the hand is holding with what the holster holds. Because an
+	// empty hand always means "fists" and an empty holster always means
+	// "nothing stored", both directions are the same operation: read both
+	// sides, write both sides. Draw, store, and swap are all this.
+	private void doSwap(int i, PlayerPawn pawn, int holsterIdx, bool offhand)
+	{
+		if (holsterIdx < 0)
+			return; // hand was not in a holster; nothing claimed it
+
+		// Debounce. A held or repeating key must not swap more than once, and
+		// a swap also cannot settle instantly -- PendingWeapon takes a tic or
+		// two to become ReadyWeapon, so a second swap inside that window reads
+		// the OLD held weapon and shuffles the same gun back and forth.
+		int idx = (i * 2) + (offhand ? 1 : 0);
+		if (level.time - lastSwapTic[idx] < SWAP_COOLDOWN)
+			return;
+		lastSwapTic[idx] = level.time;
+
+		ensureContents();
+
+		int slot = (i * HOLSTER_COUNT) + holsterIdx;
+
+		// Evict any fist a previous build managed to store. Without this the
+		// bad slots persist in a running session and keep showing a fist at
+		// the holster even after the store guard is fixed.
+		for (int c = 0; c < HOLSTER_COUNT; ++c)
+		{
+			int ci = (i * HOLSTER_COUNT) + c;
+			if (contents[ci] != "" && isFistClass(contents[ci]))
+				contents[ci] = "";
+		}
+
+		string stored = contents[slot];
+		Weapon held = offhand ? pawn.player.OffhandWeapon : pawn.player.ReadyWeapon;
+
+		// Never store the fist. It is what an empty holster looks like, not a
+		// thing that occupies one -- otherwise "swap fists into an empty
+		// holster" would fill it with a weapon the player still has anyway.
+		// "is Fist" does NOT work here: VR_Fist derives from RS_Weapon, not
+		// from Doom's Fist, so the inheritance test is always false and every
+		// fist got stored like a real weapon. That is where the extra fists
+		// came from. Match on the name, the same way findFist does.
+		string heldName = "";
+		if (held != null && !isFistClass(held.GetClassName()))
+			heldName = held.GetClassName();
+
+		if (stored == "" && heldName == "")
+			return; // fists into an empty holster: nothing to do
+
+		// Same weapon on both sides is a no-op that still costs a weapon
+		// switch. It happens when PendingWeapon has not settled yet and the
+		// hand still reports the gun it just stored.
+		if (stored == heldName)
+			return;
+
+		// A weapon lives in exactly one holster. Without this, storing the
+		// same gun in two places leaves both claiming it, and drawing from
+		// one silently empties the other.
+		if (heldName != "")
+		{
+			for (int h = 0; h < HOLSTER_COUNT; ++h)
+			{
+				int other = (i * HOLSTER_COUNT) + h;
+				if (other != slot && contents[other] == heldName)
+					contents[other] = "";
+			}
+		}
+
+		contents[slot] = heldName;
+
+		// Bring out whatever was in there. Selecting the player's OWN existing
+		// instance rather than spawning a fresh one is essential: GunBonsai
+		// perks live on the instance, and a new copy would silently drop every
+		// perk rolled on that weapon.
+		if (stored != "")
+		{
+			let w = Weapon(pawn.FindInventory(stored));
+			if (w != null)
+			{
+				// MoveWeaponToHand, never a raw OffhandWeapon assignment.
+				// Assigning the pointer directly leaves the hand's psprite
+				// still running the OLD weapon's states with the new weapon as
+				// caller, and the VM aborts the moment one of those state
+				// functions type-checks its owner:
+				//   "Invalid class VR_Fist in function call to VR_SMG.StateFunction"
+				// This routes through PendingWeapon and DropWeapon/BringUpWeapon
+				// so the psprite is torn down and rebuilt properly.
+				pawn.MoveWeaponToHand(w, offhand ? 1 : 0);
+			}
+			else
+			{
+				// Owned when stored, gone now (dropped, class-gated away, mod
+				// removed it). Clear the slot rather than leaving a holster
+				// pointing at a weapon that cannot be drawn.
+				contents[slot] = "";
+				Console.Printf("RS_HOLSTER: %s no longer in inventory, slot cleared", stored);
+				return;
+			}
+		}
+		else
+		{
+			// Holster was empty, so the hand comes back to fists. Resolved by
+			// search, not by name: this arsenal has VR_Fist, RS_GH_Fist and
+			// RS_PS_Fist (plus numbered tiers of each) and the right one
+			// depends on the player class. Hardcoding "Fist" found nothing,
+			// which is why storing a weapon appeared to do nothing at all --
+			// the gun went into the holster but never left the hand.
+			let fist = findFist(pawn, offhand);
+			if (fist != null)
+				pawn.MoveWeaponToHand(fist, offhand ? 1 : 0);
+		}
+
+		// Firmer and shorter than the entry tap -- a confirm, not a notice.
+		level.VRHaptic(offhand ? 1 : 0, 0.6, 15.0);
+
+		string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+		GetHolster(holsterIdx, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+		Console.Printf("RS_HOLSTER: %s <-> %s (%s)",
+			heldName == "" ? "fists" : heldName,
+			stored == "" ? "empty" : stored,
+			hsName);
+	}
+
+	// Everything needed to tell WHY a holster is not triggering, in one dump.
+	// Without this a mislocated anchor is indistinguishable from a dead
+	// system: both produce no console output at all.
+	private void dumpDebug(int i, PlayerPawn pawn)
+	{
+		Console.Printf("\c[Gold]--- RS_HOLSTER DEBUG ---");
+		Console.Printf("calibrated: %s   eye height: %.1f", calibrated[i] ? "yes" : "NO", eyeHeight[i]);
+		Console.Printf("HmdPos  %.1f, %.1f, %.1f   yaw %.1f", pawn.HmdPos.X, pawn.HmdPos.Y, pawn.HmdPos.Z, pawn.HmdYaw);
+		Console.Printf("pawn    %.1f, %.1f, %.1f   floor %.1f", pawn.pos.X, pawn.pos.Y, pawn.pos.Z, pawn.floorz);
+		Console.Printf("mainhnd %.1f, %.1f, %.1f", pawn.AttackPos.X, pawn.AttackPos.Y, pawn.AttackPos.Z);
+		Console.Printf("offhand %.1f, %.1f, %.1f", pawn.OffhandPos.X, pawn.OffhandPos.Y, pawn.OffhandPos.Z);
+
+		if (!calibrated[i])
+		{
+			Console.Printf("\cgnot calibrated -- no anchors computed yet");
+			return;
+		}
+
+		ensureContents();
+
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+
+			Vector3 anchor = anchorPos(i, pawn, h);
+			double dMain = (pawn.AttackPos - anchor).Length();
+			double dOff  = (pawn.OffhandPos - anchor).Length();
+			string slotHas = contents[(i * HOLSTER_COUNT) + h];
+
+			Console.Printf("%-13s at %.1f,%.1f,%.1f  r%.0f  main %.1f%s  off %.1f%s  [%s]",
+				hsName, anchor.X, anchor.Y, anchor.Z, hsRadius,
+				dMain, dMain < hsRadius ? " IN" : "",
+				dOff,  dOff  < hsRadius ? " IN" : "",
+				slotHas == "" ? "empty" : slotHas);
+		}
+
+		dumpPropOrientation(i, pawn);
+	}
+
+	// Everything the two orientation/offset natives measured for each occupied
+	// holster's model, plus what actually got applied to the actor and where
+	// the mesh ended up relative to the sphere it should be centred in. Built
+	// for exactly the "still not centred / still not barrel-down" reports --
+	// without this, the only way to tell "the native returned garbage" apart
+	// from "the math consuming it is wrong" was to keep guessing at both.
+	private void dumpPropOrientation(int i, PlayerPawn pawn)
+	{
+		Console.Printf("\c[Gold]--- prop orientation ---");
+
+		double byaw = bodyYaw[i];
+		bool anyStored = false;
+
+		for (int h = 0; h < HOLSTER_COUNT; ++h)
+		{
+			string stored = contents[(i * HOLSTER_COUNT) + h];
+			if (stored == "") continue;
+			anyStored = true;
+
+			let w = Weapon(pawn.FindInventory(stored));
+			if (w == null)
+			{
+				Console.Printf("%-13s [%s] -- NOT in inventory, cannot resolve", "?", stored);
+				continue;
+			}
+
+			State rs = w.FindState("Ready");
+			if (rs == null)
+			{
+				Console.Printf("%-13s [%s] -- no Ready state, cannot resolve model", "?", stored);
+				continue;
+			}
+
+			bool foundOri, mirrored;
+			double angOff, pitOff, rolOff;
+			[foundOri, mirrored, angOff, pitOff, rolOff] = level.GetModelOrientationHint(w.GetClass(), rs.sprite, rs.Frame);
+
+			double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
+			bool foundOff;
+			double offX, offY, offZ;
+			[foundOff, offX, offY, offZ] = level.GetModelOffsetHint(w.GetClass(), rs.sprite, rs.Frame, stretch);
+
+			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+
+			double extra = RS_HolsterProp.holsterPropYaw() + edYaw[h] + (mirrored ? 180.0 : 0.0);
+			double finalAngle = byaw + extra - angOff;
+			double finalPitch = edPitch[h] + RS_HolsterProp.holsterPropPitch() - pitOff;
+
+			Console.Printf("%-13s [%s]", hsName, stored);
+			Console.Printf("  orientation hint: found=%d mirrored=%d angOff=%.1f pitOff=%.1f rolOff=%.1f",
+				foundOri, mirrored, angOff, pitOff, rolOff);
+			Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
+				foundOff, offX, offY, offZ);
+			Console.Printf("  applied:          angle=%.1f pitch=%.1f  (body yaw %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",
+				finalAngle, finalPitch, byaw, hsPitch, RS_HolsterProp.holsterPropYaw(), RS_HolsterProp.holsterPropPitch());
+
+			if (!foundOri || !foundOff)
+				Console.Printf("\cg  NATIVE RETURNED NOT-FOUND -- class/sprite/frame lookup failed, model may not have hasmodel set or FSpriteModelFrame is missing for this (sprite,frame)");
+
+			int pi = (i * HOLSTER_COUNT) + h;
+			if (pi < props.Size() && props[pi] != null)
+			{
+				Vector3 anchor = anchorPos(i, pawn, h);
+				double drift = (props[pi].pos - anchor).Length();
+				Console.Printf("  prop actual pos:  %.1f, %.1f, %.1f   sphere at %.1f, %.1f, %.1f   drift %.2f%s",
+					props[pi].pos.X, props[pi].pos.Y, props[pi].pos.Z,
+					anchor.X, anchor.Y, anchor.Z, drift,
+					drift > hsRadius ? "  <-- OUTSIDE the sphere" : "");
+			}
+		}
+
+		if (!anyStored)
+			Console.Printf("(nothing stored anywhere -- store a weapon first, then run this again)");
+	}
+
+	private void ensureContents()
+	{
+		int want = MAXPLAYERS * HOLSTER_COUNT;
+		while (contents.Size() < want)
+			contents.Push("");
+	}
+}

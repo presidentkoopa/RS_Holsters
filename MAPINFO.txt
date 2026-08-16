@@ -1,0 +1,4 @@
+Gameinfo
+{
+	AddEventHandlers = "RS_HolsterManager"
+}

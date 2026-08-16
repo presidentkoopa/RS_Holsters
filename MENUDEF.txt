@@ -1,0 +1,56 @@
+// Hooked directly into the root options menu rather than nested under
+// RS_Main's own submenu -- this pk3's menu presence should not depend on
+// RS_Main's menu structure, even though the holsters themselves still need
+// RS_Main's weapon classes loaded to have anything to show.
+AddOptionMenu "OptionsMenu"
+{
+	StaticText " "
+	Submenu "Body Holsters", "RS_HolsterOptions"
+}
+
+// ---------------------------------------------------------------------
+// Body Holsters. Everything that used to need a netevent typed into the
+// console, plus the engine cvars that govern how grip behaves.
+//
+// SafeCommand rather than Command for the destructive/modal ones: edit
+// mode and reset both change state you would not want triggered by a
+// misread controller press while scrolling a menu in VR.
+// ---------------------------------------------------------------------
+OptionMenu "RS_HolsterOptions"
+{
+	Title "Body Holsters"
+	StaticText " "
+
+	StaticText "Placement", "Gold"
+	SafeCommand "Edit Mode -- grab spheres and move them", "netevent rs-holster-edit"
+	SafeCommand "Print tuned table to console",            "netevent rs-holster-table"
+	SafeCommand "Reset offsets to defaults",               "netevent rs-holster-reset"
+	SafeCommand "Recalibrate standing height",             "netevent rs-holster-recalibrate"
+	StaticText " "
+
+	StaticText "Display", "Gold"
+	Option "Show holster spheres",      "rs_holster_props", "OnOff"
+	Slider "Stored weapon size",        "rs_holster_prop_scale", 0.05, 1.0, 0.01, 2
+	Slider "Stored weapon yaw",         "rs_holster_prop_yaw", -180.0, 180.0, 5.0, 0
+	Slider "Stored weapon pitch",       "rs_holster_prop_pitch", -180.0, 180.0, 5.0, 0
+	Slider "Stored weapon roll",        "rs_holster_prop_roll",  -180.0, 180.0, 5.0, 0
+	Slider "Stored weapon up/down",     "rs_holster_prop_up",  -12.0, 12.0, 0.5, 1
+	Slider "Stored weapon fwd/back",    "rs_holster_prop_fwd", -12.0, 12.0, 0.5, 1
+	Slider "Stored weapon side",        "rs_holster_prop_side", -12.0, 12.0, 0.5, 1
+	StaticText " "
+
+	StaticText "Grip", "Gold"
+	// When on, a hand inside a holster spends its grip on the holster and
+	// nothing else -- stabilize and the shift layer both stand down for
+	// that hand. Off leaves grip alone entirely and the bound holster keys
+	// are the only way in. These three are ENGINE cvars (DoomXR), not this
+	// pk3's own -- referencing them here does not require this pk3 to own
+	// or declare them.
+	Option "Grip works holsters",       "vr_holster_use_grip", "OnOff"
+	Option "Two handed weapons",        "vr_two_handed_weapons", "OnOff"
+	Slider "Stabilize distance (in)",   "vr_stabilize_distance_inches", 1.0, 24.0, 1.0, 0
+	StaticText " "
+
+	StaticText "Diagnostics", "Gold"
+	SafeCommand "Debug dump to console", "netevent rs-holster-debug"
+}

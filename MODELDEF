@@ -1,0 +1,15 @@
+Model RS_HolsterMarker
+{
+	Path "models"
+	Model 0 "rs_wiresphere.obj"
+	Skin 0 "rs_wire_idle.png"
+	Model 1 "rs_wiresphere.obj"
+	Skin 1 "rs_wire_hot.png"
+	Scale 3.0 3.0 3.0
+
+	FrameIndex RSHM A 0 0
+	FrameIndex RSHM B 1 0
+	USEACTORPITCH
+	USEACTORROLL
+}
+

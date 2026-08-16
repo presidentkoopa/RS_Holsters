@@ -1,0 +1,28 @@
+// Show a model of the stored weapon at each body holster anchor.
+user bool rs_holster_props = true;
+
+// Holster prop appearance. Live-tunable because the right values are found by
+// looking at them in the headset, not by reasoning about model units.
+// A weapon's MODELDEF Scale is tuned for the HUD projection, so reusing it on
+// a world actor renders it enormous -- hence the shrink.
+user float rs_holster_prop_scale = 0.18;
+
+// Trim on top of each holster's own pitch/roll (RS_Holsters.zs, GetHolster).
+// Every weapon MODELDEF block carries USEACTORPITCH/USEACTORROLL (added by
+// Add-ModelDefPitchFlags.ps1), so these do real work now -- earlier they did
+// nothing at all, silently, because the renderer ignored both flags entirely.
+user float rs_holster_prop_pitch = 0.0;
+user float rs_holster_prop_roll  = 0.0;
+
+// Centring trim, on top of the AUTOMATIC correction (level.GetModelOffsetHint,
+// read per-weapon in RS_HolsterProp.ShowWeapon). Residual now, not the whole
+// mechanism -- a weapon's baked MODELDEF Offset is measured and cancelled
+// automatically; these three exist for whatever the automatic fix does not
+// fully resolve for a given model.
+user float rs_holster_prop_up   = 0.0;
+user float rs_holster_prop_fwd  = 0.0;
+user float rs_holster_prop_side = 0.0;
+
+// Yaw trim, plus the automatic mirror-flip and AngleOffset cancellation
+// (level.GetModelOrientationHint) applied ahead of it.
+user float rs_holster_prop_yaw = 0.0;

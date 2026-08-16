@@ -1,0 +1,24 @@
+version "4.14"
+
+// Body-anchored holsters. Split out of RS_Main 2026-08-16 -- same author,
+// same engine (UZDXREMA/DoomXR), no genericization needed.
+//
+// REAL DEPENDENCIES, this pk3 is not standalone-playable without them:
+//   - RS_Main must be loaded too: RS_HolsterProp borrows weapon models via
+//     A_ChangeModel(w.GetClassName()), which resolves against that weapon's
+//     OWN MODELDEF block -- those live in RS_Main's MODELDEF (360+ entries)
+//     and cannot be duplicated here without them being the same file twice.
+//   - The engine (UZDXREMA/DoomXR) fields this drives are native, not stock
+//     GZDoom: HmdPos/HmdYaw/HmdPitch/HmdRoll, HolsterClaimMain/Off,
+//     GripContextMain/Off, VRTurnYaw, StabilizeReach, and the natives
+//     level.VRHaptic / level.GetModelOrientationHint / level.GetModelOffsetHint.
+//     None of this runs on stock GZDoom or on QuestZDoom proper.
+//   - RS_HolsterManager.doSwap calls PlayerPawn.MoveWeaponToHand and reads
+//     ReadyWeapon/OffhandWeapon -- the dual-wield VR conventions RS_Main's
+//     weapons use. A mod without that offhand system would have working
+//     anchors/claims/grip but nothing sensible for "draw" to do.
+//
+// RS_HolsterManager must ALSO be in MAPINFO.txt's AddEventHandlers (it is).
+
+#include "zscript/systems/player/RS_HolsterProp.zs"
+#include "zscript/systems/player/RS_Holsters.zs"

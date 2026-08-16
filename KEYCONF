@@ -1,0 +1,38 @@
+addkeysection "RS Holsters" RSHolsters
+
+// The engine redirects grip to these keys, per hand, ONLY when the grip
+// arbiter resolves a clean tap (pressed and released, no other button joined
+// it) that started inside a holster's radius (see DoomXR
+// vk_openxrdevice.cpp, HolsterClaim*/xrGripContext). Outside a holster, or
+// during a combo, grip keeps its normal meaning entirely -- these never fire.
+// That is why binding grip's holster role here does not steal grip from
+// two-hand stabilize or the secondary-button modifier layer.
+addmenukey "Holster: store/draw (MAIN hand)" rs_holster_main
+alias rs_holster_main "netevent rs-holster-grab-main"
+defaultbind F13 rs_holster_main
+
+addmenukey "Holster: store/draw (OFF hand)" rs_holster_off
+alias rs_holster_off "netevent rs-holster-grab-off"
+defaultbind F14 rs_holster_off
+
+addmenukey "Holster: recalibrate height" rs_holster_recal
+alias rs_holster_recal "netevent rs-holster-recalibrate"
+
+// Dumps eye height, head pose, both hand positions, every anchor's world
+// position and distance from each hand, and (if anything is stored) the exact
+// orientation/offset each weapon's model measured plus what got applied. This
+// is the tool for "nothing is happening" or "it's still wrong" -- it turns a
+// silent non-event, or an unexplained visual bug, into numbers.
+addmenukey "Holster: debug dump" rs_holster_debug
+alias rs_holster_debug "netevent rs-holster-debug"
+
+// Edit mode: drag the holster spheres onto your actual body, then dump the
+// numbers. Beats deriving offsets from proportion tables and hoping.
+addmenukey "Holster: EDIT MODE toggle" rs_holster_edit
+alias rs_holster_edit "netevent rs-holster-edit"
+
+addmenukey "Holster: print tuned table" rs_holster_table
+alias rs_holster_table "netevent rs-holster-table"
+
+addmenukey "Holster: reset offsets" rs_holster_reset
+alias rs_holster_reset "netevent rs-holster-reset"
