@@ -113,6 +113,16 @@ class RS_HolsterManager : EventHandler
 	int nearMain[MAXPLAYERS];
 	int nearOff[MAXPLAYERS];
 
+	// Holster index awaiting an auto-diagnostic dump, -1 for none. Set by
+	// doSwap right after a store; consumed one tic later in WorldTick, AFTER
+	// updateClaims (and the updateProps it calls) has actually repositioned
+	// the prop for the new contents. Dumping inside doSwap itself would print
+	// the PREVIOUS tic's prop position -- correct orientation numbers (those
+	// are computed fresh from the weapon class) but a stale/misleading
+	// "actual pos vs sphere" line, since that part only updates on
+	// WorldTick's own pass, not the instant contents[] changes.
+	int pendingDump[MAXPLAYERS];
+
 	// Contents by holster index, flattened to one array because ZScript has
 	// no 2D dynamic arrays: index as (player * HOLSTER_COUNT + holster).
 	// Empty string means the holster holds nothing, which reads to the player
@@ -190,13 +200,30 @@ class RS_HolsterManager : EventHandler
 
 			if (!calibrated[i])
 			{
+				bool wasCalibrated = calibrated[i];
 				tryCalibrate(i, pawn);
+				// int arrays default to 0, a VALID holster index -- not -1.
+				// Reset right on the transition into calibrated, once, so the
+				// very first WorldTick pass after calibration can't misread a
+				// zero-default as "holster 0 has a pending dump" and print an
+				// empty auto-dump header before anything has ever been stored.
+				if (calibrated[i] && !wasCalibrated)
+					pendingDump[i] = -1;
 				continue; // no anchors, no claims, until calibration lands
 			}
 
 			updateBodyYaw(i, pawn);
 			updateGrabs(i, pawn);
-			updateClaims(i, pawn);
+			updateClaims(i, pawn); // also repositions props, via updateProps
+
+			// Consume a dump queued by last tic's store, now that this tic's
+			// updateClaims has actually moved the prop into place.
+			if (pendingDump[i] >= 0)
+			{
+				Console.Printf("\c[Gold]--- RS_HOLSTER auto (stored) ---");
+				dumpOneHolsterProp(i, pawn, pendingDump[i]);
+				pendingDump[i] = -1;
+			}
 		}
 	}
 
@@ -892,6 +919,14 @@ class RS_HolsterManager : EventHandler
 			heldName == "" ? "fists" : heldName,
 			stored == "" ? "empty" : stored,
 			hsName);
+
+		// Auto-diagnostic: if a real weapon just went INTO this holster (not a
+		// fists-only draw with nothing to measure), queue a dump for next tic.
+		// This is what makes "record as I play" true -- store a gun and the
+		// full orientation/offset breakdown lands in the log on its own, no
+		// menu, no netevent, nothing to remember mid-session.
+		if (contents[slot] != "")
+			pendingDump[i] = holsterIdx;
 	}
 
 	// Everything needed to tell WHY a holster is not triggering, in one dump.
@@ -944,70 +979,81 @@ class RS_HolsterManager : EventHandler
 	{
 		Console.Printf("\c[Gold]--- prop orientation ---");
 
-		double byaw = bodyYaw[i];
 		bool anyStored = false;
-
 		for (int h = 0; h < HOLSTER_COUNT; ++h)
 		{
-			string stored = contents[(i * HOLSTER_COUNT) + h];
-			if (stored == "") continue;
+			if (contents[(i * HOLSTER_COUNT) + h] == "") continue;
 			anyStored = true;
-
-			let w = Weapon(pawn.FindInventory(stored));
-			if (w == null)
-			{
-				Console.Printf("%-13s [%s] -- NOT in inventory, cannot resolve", "?", stored);
-				continue;
-			}
-
-			State rs = w.FindState("Ready");
-			if (rs == null)
-			{
-				Console.Printf("%-13s [%s] -- no Ready state, cannot resolve model", "?", stored);
-				continue;
-			}
-
-			bool foundOri, mirrored;
-			double angOff, pitOff, rolOff;
-			[foundOri, mirrored, angOff, pitOff, rolOff] = level.GetModelOrientationHint(w.GetClass(), rs.sprite, rs.Frame);
-
-			double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
-			bool foundOff;
-			double offX, offY, offZ;
-			[foundOff, offX, offY, offZ] = level.GetModelOffsetHint(w.GetClass(), rs.sprite, rs.Frame, stretch);
-
-			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
-			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
-
-			double extra = RS_HolsterProp.holsterPropYaw() + edYaw[h] + (mirrored ? 180.0 : 0.0);
-			double finalAngle = byaw + extra - angOff;
-			double finalPitch = edPitch[h] + RS_HolsterProp.holsterPropPitch() - pitOff;
-
-			Console.Printf("%-13s [%s]", hsName, stored);
-			Console.Printf("  orientation hint: found=%d mirrored=%d angOff=%.1f pitOff=%.1f rolOff=%.1f",
-				foundOri, mirrored, angOff, pitOff, rolOff);
-			Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
-				foundOff, offX, offY, offZ);
-			Console.Printf("  applied:          angle=%.1f pitch=%.1f  (body yaw %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",
-				finalAngle, finalPitch, byaw, hsPitch, RS_HolsterProp.holsterPropYaw(), RS_HolsterProp.holsterPropPitch());
-
-			if (!foundOri || !foundOff)
-				Console.Printf("\cg  NATIVE RETURNED NOT-FOUND -- class/sprite/frame lookup failed, model may not have hasmodel set or FSpriteModelFrame is missing for this (sprite,frame)");
-
-			int pi = (i * HOLSTER_COUNT) + h;
-			if (pi < props.Size() && props[pi] != null)
-			{
-				Vector3 anchor = anchorPos(i, pawn, h);
-				double drift = (props[pi].pos - anchor).Length();
-				Console.Printf("  prop actual pos:  %.1f, %.1f, %.1f   sphere at %.1f, %.1f, %.1f   drift %.2f%s",
-					props[pi].pos.X, props[pi].pos.Y, props[pi].pos.Z,
-					anchor.X, anchor.Y, anchor.Z, drift,
-					drift > hsRadius ? "  <-- OUTSIDE the sphere" : "");
-			}
+			dumpOneHolsterProp(i, pawn, h);
 		}
 
 		if (!anyStored)
 			Console.Printf("(nothing stored anywhere -- store a weapon first, then run this again)");
+	}
+
+	// Everything the two orientation/offset natives measured for ONE occupied
+	// holster's model, plus what actually got applied and where the mesh ended
+	// up relative to the sphere. Factored out of dumpPropOrientation so the
+	// same diagnostic can fire AUTOMATICALLY the instant a store happens (see
+	// doSwap), not just on a manual dump -- "record as I play" instead of
+	// needing to remember a menu press.
+	private void dumpOneHolsterProp(int i, PlayerPawn pawn, int h)
+	{
+		string stored = contents[(i * HOLSTER_COUNT) + h];
+		if (stored == "") return;
+
+		let w = Weapon(pawn.FindInventory(stored));
+		if (w == null)
+		{
+			Console.Printf("%-13s [%s] -- NOT in inventory, cannot resolve", "?", stored);
+			return;
+		}
+
+		State rs = w.FindState("Ready");
+		if (rs == null)
+		{
+			Console.Printf("%-13s [%s] -- no Ready state, cannot resolve model", "?", stored);
+			return;
+		}
+
+		bool foundOri, mirrored;
+		double angOff, pitOff, rolOff;
+		[foundOri, mirrored, angOff, pitOff, rolOff] = level.GetModelOrientationHint(w.GetClass(), rs.sprite, rs.Frame);
+
+		double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
+		bool foundOff;
+		double offX, offY, offZ;
+		[foundOff, offX, offY, offZ] = level.GetModelOffsetHint(w.GetClass(), rs.sprite, rs.Frame, stretch);
+
+		string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
+		GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
+
+		double byaw = bodyYaw[i];
+		double extra = RS_HolsterProp.holsterPropYaw() + edYaw[h] + (mirrored ? 180.0 : 0.0);
+		double finalAngle = byaw + extra - angOff;
+		double finalPitch = edPitch[h] + RS_HolsterProp.holsterPropPitch() - pitOff;
+
+		Console.Printf("%-13s [%s]", hsName, stored);
+		Console.Printf("  orientation hint: found=%d mirrored=%d angOff=%.1f pitOff=%.1f rolOff=%.1f",
+			foundOri, mirrored, angOff, pitOff, rolOff);
+		Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
+			foundOff, offX, offY, offZ);
+		Console.Printf("  applied:          angle=%.1f pitch=%.1f  (body yaw %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",
+			finalAngle, finalPitch, byaw, hsPitch, RS_HolsterProp.holsterPropYaw(), RS_HolsterProp.holsterPropPitch());
+
+		if (!foundOri || !foundOff)
+			Console.Printf("\cg  NATIVE RETURNED NOT-FOUND -- class/sprite/frame lookup failed, model may not have hasmodel set or FSpriteModelFrame is missing for this (sprite,frame)");
+
+		int pi = (i * HOLSTER_COUNT) + h;
+		if (pi < props.Size() && props[pi] != null)
+		{
+			Vector3 anchor = anchorPos(i, pawn, h);
+			double drift = (props[pi].pos - anchor).Length();
+			Console.Printf("  prop actual pos:  %.1f, %.1f, %.1f   sphere at %.1f, %.1f, %.1f   drift %.2f%s",
+				props[pi].pos.X, props[pi].pos.Y, props[pi].pos.Z,
+				anchor.X, anchor.Y, anchor.Z, drift,
+				drift > hsRadius ? "  <-- OUTSIDE the sphere" : "");
+		}
 	}
 
 	private void ensureContents()
