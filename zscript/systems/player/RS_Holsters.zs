@@ -584,50 +584,41 @@ class RS_HolsterManager : EventHandler
 			p.pitch = finalPitch;
 			p.roll  = edRoll[h] + RS_HolsterProp.holsterPropRoll() - p.bakedRollOffset;
 
-			// Centring nudge, in the MESH'S OWN rotated frame -- not a flat body
-			// frame. Checked against engine source rather than assumed:
-			// RenderModel (r_data/models.cpp) applies a weapon's MODELDEF
-			// Offset AFTER actor rotation (step 4 follows step 1), so the
-			// offset is expressed in the model's own rotated local axes. A
-			// fixed body-frame trim can only line up for one specific pitch --
-			// which is exactly the "sits outside and in front" bug once pitch
-			// stopped being a flat 90 for every holster. Deriving the nudge
-			// from the SAME angle/pitch just assigned keeps it correct
-			// regardless of how any given holster is oriented.
+			// Local basis for the MANUAL TRIM sliders only now (below). "Push it
+			// forward" should mean forward-relative-to-the-gun, not raw world X,
+			// so the trim still rides this rotated frame -- but this basis is no
+			// longer used for the automatic correction. It was a hand-derived
+			// reconstruction of the engine's own rotation, and it was wrong: two
+			// independent derivations (direct and cross-product-verified) each
+			// passed their own internal consistency check and still landed the
+			// prop exactly 4.55 units off, on opposite sides depending on sign,
+			// because neither accounted for RenderModel silently NEGATING pitch
+			// before rotating (r_data/models.cpp: "pitch -= angles.Pitch.Degrees()"
+			// under MDL_USEACTORPITCH without MDL_BADROTATION). That is not a
+			// mistake worth repeating a third time by hand.
 			double localFwdX =  cos(finalAngle) * cos(finalPitch);
 			double localFwdY =  sin(finalAngle) * cos(finalPitch);
 			double localFwdZ = -sin(finalPitch);
 			double localUpX  = -cos(finalAngle) * sin(finalPitch);
 			double localUpY  = -sin(finalAngle) * sin(finalPitch);
 			double localUpZ  = -cos(finalPitch);
-			// Third axis of the same basis, yaw-only (matches hsSide's own
-			// convention elsewhere in this file: rx=sin(yaw), ry=-cos(yaw)).
-			// Roll is not folded in here; every holster's roll is currently 0,
-			// so this is exact for the data that exists, not for the general
-			// case -- same honest limit as the rotation-offset cancellation.
 			double rightX = sin(finalAngle);
 			double rightY = -cos(finalAngle);
 
-			// AUTOMATIC centering: the model's own baked position offset
-			// (level.GetModelOffsetHint, read in RS_HolsterProp.ShowWeapon),
-			// rotated into world space by the SAME basis the actor is oriented
-			// with, then subtracted -- so the mesh, which the renderer will
-			// displace by this exact vector once it applies the actor's own
-			// rotation, lands back at the sphere centre instead of wherever its
-			// raw MODELDEF Offset happens to push it. This is the actual fix
-			// for centering; a manual slider defaulting to zero was never a
-			// fix, it was an unset correction nobody had reason to know about.
-			//
-			// Axis mapping (Doom-local X/Y/Z from GetModelOffsetHint -> this
-			// basis) is X=forward, Y=right, Z=up, matching how those axes
-			// behave for an unrotated Doom actor. Not verified in-engine --
-			// the manual trim sliders below stay live as a recovery path if
-			// this mapping or a sign turns out wrong for some model.
-			double worldOffX = (p.bakedOffX * localFwdX) + (p.bakedOffY * rightX) + (p.bakedOffZ * localUpX);
-			double worldOffY = (p.bakedOffX * localFwdY) + (p.bakedOffY * rightY) + (p.bakedOffZ * localUpY);
-			double worldOffZ = (p.bakedOffX * localFwdZ)                          + (p.bakedOffZ * localUpZ);
+			// AUTOMATIC centering: level.GetModelWorldOffset builds the SAME
+			// VSMatrix with the SAME rotate() calls RenderModel itself makes
+			// (including the pitch negation above) and transforms the model's
+			// baked local offset through it directly -- the engine's own
+			// transform, replayed, not a reconstruction of it. p.sprite/p.frame
+			// are exactly the (sprite,frame) A_ChangeModel bound in ShowWeapon.
+			double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
+			bool foundWorld;
+			double worldOffX, worldOffY, worldOffZ;
+			[foundWorld, worldOffX, worldOffY, worldOffZ] =
+				level.GetModelWorldOffset(p.shownClass, p.sprite, p.frame, stretch, finalAngle, finalPitch, p.roll);
+			if (!foundWorld) { worldOffX = 0.0; worldOffY = 0.0; worldOffZ = 0.0; }
 
-			// Manual trim, same rotated frame, on top of the automatic
+			// Manual trim, local rotated frame, on top of the automatic
 			// correction -- a residual nudge now, not the whole mechanism.
 			double nUp   = RS_HolsterProp.holsterPropUp();
 			double nFwd  = RS_HolsterProp.holsterPropFwd();
@@ -1033,15 +1024,22 @@ class RS_HolsterManager : EventHandler
 		double finalAngle = byaw + extra - angOff;
 		double finalPitch = edPitch[h] + RS_HolsterProp.holsterPropPitch() - pitOff;
 
+		double finalRoll = edRoll[h] + RS_HolsterProp.holsterPropRoll() - rolOff;
+		bool foundWorld; double worldDX, worldDY, worldDZ;
+		[foundWorld, worldDX, worldDY, worldDZ] =
+			level.GetModelWorldOffset(w.GetClass(), rs.sprite, rs.Frame, stretch, finalAngle, finalPitch, finalRoll);
+
 		Console.Printf("%-13s [%s]", hsName, stored);
 		Console.Printf("  orientation hint: found=%d mirrored=%d angOff=%.1f pitOff=%.1f rolOff=%.1f",
 			foundOri, mirrored, angOff, pitOff, rolOff);
 		Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
 			foundOff, offX, offY, offZ);
+		Console.Printf("  world offset:     found=%d  world(x,y,z)= %.2f, %.2f, %.2f  (via GetModelWorldOffset, replays the engine's own rotation)",
+			foundWorld, worldDX, worldDY, worldDZ);
 		Console.Printf("  applied:          angle=%.1f pitch=%.1f  (body yaw %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",
 			finalAngle, finalPitch, byaw, hsPitch, RS_HolsterProp.holsterPropYaw(), RS_HolsterProp.holsterPropPitch());
 
-		if (!foundOri || !foundOff)
+		if (!foundOri || !foundOff || !foundWorld)
 			Console.Printf("\cg  NATIVE RETURNED NOT-FOUND -- class/sprite/frame lookup failed, model may not have hasmodel set or FSpriteModelFrame is missing for this (sprite,frame)");
 
 		int pi = (i * HOLSTER_COUNT) + h;
