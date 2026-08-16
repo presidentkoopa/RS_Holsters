@@ -23,6 +23,14 @@ OptionValue "RS_HolsterMarkerColor"
 	4, "Purple"
 }
 
+OptionValue "RS_HolsterActiveCount"
+{
+	2, "2 -- Hip"
+	4, "4 -- + Shoulder"
+	6, "6 -- + Pectoral"
+	8, "8 -- + Hip (dual)"
+}
+
 AddOptionMenu "OptionsMenu"
 {
 	StaticText " "
@@ -43,6 +51,7 @@ OptionMenu "RS_HolsterOptions"
 	StaticText " "
 
 	StaticText "Placement", "Gold"
+	Option "How many holsters",         "rs_holster_active_count", "RS_HolsterActiveCount"
 	SafeCommand "Edit Mode -- grab spheres and move them", "netevent rs-holster-edit"
 	SafeCommand "Print tuned table to console",            "netevent rs-holster-table"
 	SafeCommand "Reset offsets to defaults",               "netevent rs-holster-reset"

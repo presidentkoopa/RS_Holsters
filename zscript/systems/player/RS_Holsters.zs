@@ -25,7 +25,7 @@
 
 class RS_HolsterManager : EventHandler
 {
-	const HOLSTER_COUNT = 6;
+	const HOLSTER_COUNT = 8;
 
 	// Doom's player scale puts a map unit at roughly one real inch (player
 	// radius 16 ~ a person's half shoulder width), so these read as inches.
@@ -95,8 +95,20 @@ class RS_HolsterManager : EventHandler
 			// 90/0/0 at the top of this function already.
 			case 4:
 				hsName = "PectoralLeft";  hsFwd = -1.0; hsSide = -6.0; hsFrac = 0.78; hsRadius = 3.0; break;
-			default:
+			case 5:
 				hsName = "PectoralRight"; hsFwd = -1.0; hsSide =  6.0; hsFrac = 0.78; hsRadius = 3.0; break;
+
+			// Second hip pair -- the "2/4/6/8" tier's last step. Same depth
+			// and height as the first hip pair, offset further out along
+			// hsSide so the two sit side by side rather than overlapping:
+			// radius 3.0 means each is a 6-inch catch volume, so two
+			// centres 7 units apart leave a 1-inch gap between them, not a
+			// shared boundary. Like the others, a starting guess meant to
+			// be dragged into place, not a measured position.
+			case 6:
+				hsName = "HipLeft2";  hsFwd = -2.0; hsSide = -16.0; hsFrac = 0.57; hsRadius = 3.0; break;
+			default:
+				hsName = "HipRight2"; hsFwd = -2.0; hsSide =  16.0; hsFrac = 0.57; hsRadius = 3.0; break;
 		}
 	}
 
@@ -573,6 +585,13 @@ class RS_HolsterManager : EventHandler
 
 		for (int h = 0; h < HOLSTER_COUNT; ++h)
 		{
+			// An inactive holster (active count dialed below 8) is not
+			// visible and must not be claimable either -- a hand should
+			// never be able to trigger a store/draw on a holster it cannot
+			// see, hysteresis-held or not.
+			if (!holsterActive(h))
+				continue;
+
 			string hsName; double hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll;
 			GetHolster(h, hsName, hsFwd, hsSide, hsFrac, hsRadius, hsPitch, hsYaw, hsRoll);
 
@@ -639,6 +658,22 @@ class RS_HolsterManager : EventHandler
 		for (int h = 0; h < HOLSTER_COUNT; ++h)
 		{
 			int pi = (i * HOLSTER_COUNT) + h;
+
+			// Same "invisible, not destroyed" treatment showProps() already
+			// uses for the whole system -- dialing the active count down
+			// hides a holster without evacuating whatever might be stored in
+			// it, so raising the count back up later shows it exactly as it
+			// was left. updateClaims already refuses to claim an inactive
+			// index; this is what makes it actually disappear too.
+			if (!holsterActive(h))
+			{
+				if (pi < markers.Size() && markers[pi] != null)
+					markers[pi].bINVISIBLE = true;
+				if (pi < props.Size() && props[pi] != null)
+					props[pi].bINVISIBLE = true;
+				continue;
+			}
+
 			Vector3 at = anchorPos(i, pawn, h);
 
 			// Declared here, once, rather than where the weapon prop's own
@@ -931,6 +966,27 @@ class RS_HolsterManager : EventHandler
 	{
 		let cv = CVar.GetCVar("rs_holster_props", players[consoleplayer]);
 		return (cv != null) ? cv.GetBool() : true;
+	}
+
+	// How many of the 8 declared holsters are actually live: 2 (hip), 4
+	// (+shoulder), 6 (+pectoral), 8 (+second hip pair) -- matching the
+	// GetHolster index order exactly, so "active count N" always means
+	// "indices 0..N-1", no separate ordering table needed. Clamped and
+	// snapped to the nearest valid step rather than trusted raw, since this
+	// cvar can be hand-edited in an ini to any int.
+	private int activeCount() const
+	{
+		let cv = CVar.GetCVar("rs_holster_active_count", players[consoleplayer]);
+		int n = (cv != null) ? cv.GetInt() : HOLSTER_COUNT;
+		if (n <= 2) return 2;
+		if (n <= 4) return 4;
+		if (n <= 6) return 6;
+		return 8;
+	}
+
+	private bool holsterActive(int h) const
+	{
+		return h < activeCount();
 	}
 
 	private bool instantSwitchEnabled() const

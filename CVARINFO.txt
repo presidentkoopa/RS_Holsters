@@ -55,3 +55,12 @@ user bool rs_holster_instant_switch = true;
 user int rs_holster_marker_shape = 0;
 // 0 = default (untinted), 1 = blue, 2 = red, 3 = gold, 4 = purple.
 user int rs_holster_marker_color = 0;
+
+// How many of the 8 declared holsters are live: 2 = hip, 4 = +shoulder,
+// 6 = +pectoral, 8 = +second hip pair (RS_Holsters.zs, GetHolster/
+// activeCount). Snapped to the nearest of those four on read, so any other
+// value (a hand-edited ini, an old config) still resolves to something
+// sane rather than an in-between state nothing was ever tuned for.
+// Defaults to everything on -- the point of just having added the second
+// hip pair is seeing it, not opting into it separately.
+user int rs_holster_active_count = 8;
