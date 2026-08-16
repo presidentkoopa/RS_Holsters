@@ -46,3 +46,12 @@ user int rs_holster_sound_style = 0;
 // ~16 tics, so there is no shared-PendingWeapon window for a second hand's
 // swap to collide with.
 user bool rs_holster_instant_switch = true;
+
+// Marker look. Shape reads at SetHot's next re-check (immediate, since
+// SetHot's guard watches this cvar too -- RS_HolsterProp.zs). Color is a
+// class choice, not a field, so a change respawns the marker the next tic
+// (RS_Holsters.zs updateProps) rather than tinting an existing one live.
+// 0 = bracket reticle, 1 = the original wireframe sphere.
+user int rs_holster_marker_shape = 0;
+// 0 = default (untinted), 1 = blue, 2 = red, 3 = gold, 4 = purple.
+user int rs_holster_marker_color = 0;

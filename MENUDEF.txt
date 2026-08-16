@@ -8,6 +8,21 @@ OptionValue "RS_HolsterSoundStyle"
 	1, "Ready-to-fire beep"
 }
 
+OptionValue "RS_HolsterMarkerShape"
+{
+	0, "Bracket reticle"
+	1, "Wireframe sphere"
+}
+
+OptionValue "RS_HolsterMarkerColor"
+{
+	0, "Default"
+	1, "Blue"
+	2, "Red"
+	3, "Gold"
+	4, "Purple"
+}
+
 AddOptionMenu "OptionsMenu"
 {
 	StaticText " "
@@ -48,6 +63,8 @@ OptionMenu "RS_HolsterOptions"
 
 	StaticText "Display", "Gold"
 	Option "Show holster spheres",      "rs_holster_props", "OnOff"
+	Option "Marker shape",              "rs_holster_marker_shape", "RS_HolsterMarkerShape"
+	Option "Marker color",              "rs_holster_marker_color", "RS_HolsterMarkerColor"
 	Slider "Stored weapon size",        "rs_holster_prop_scale", 0.05, 1.0, 0.01, 2
 	Slider "Stored weapon yaw",         "rs_holster_prop_yaw", -180.0, 180.0, 5.0, 0
 	Slider "Stored weapon pitch",       "rs_holster_prop_pitch", -180.0, 180.0, 5.0, 0

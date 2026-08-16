@@ -57,16 +57,66 @@ class RS_HolsterMarker : Actor
 
 	// Tracks the current look so the state is only re-entered on a change.
 	// SetStateLabel restarts the state, so calling it every tic would keep
-	// resetting the sprite forever.
+	// resetting the sprite forever. lastShape rides along in the SAME guard
+	// -- without it, changing the shape cvar mid-session would sit inert
+	// until this holster's hot/idle state happened to toggle on its own
+	// (the next time a hand entered or left it), which reads as "the menu
+	// setting did nothing" rather than "not yet, still waiting."
 	private bool isHot;
 	private bool everSet;
+	// No sentinel needed: everSet already gates "first call ever" on its own
+	// (no field initializer here -- there is no precedent anywhere in this
+	// codebase for one, and no way to confirm ZScript even allows it without
+	// a test-compile this session cannot do). The default 0 is never
+	// mistaken for "already matches", because everSet being false forces the
+	// guard below to proceed regardless of what lastShape happens to hold.
+	private int lastShape;
+
+	// 0 = bracket reticle (the default), 1 = the original wireframe sphere.
+	// Both files stay on disk permanently now -- this is a choice, not a
+	// replacement.
+	static int holsterMarkerShape()
+	{
+		let cv = CVar.GetCVar("rs_holster_marker_shape", players[consoleplayer]);
+		return (cv != null) ? cv.GetInt() : 0;
+	}
+
+	// A fixed small palette, not an arbitrary color picker. GZDoom's
+	// Translation is a per-CLASS Default property (Actor.Translation is
+	// writable, but there is no runtime API in this fork for building an
+	// arbitrary RGB translation from a plain int/color at a holster's own
+	// spawn time without risking an unverified cast this session has no way
+	// to test-compile) -- so each choice is its own subclass carrying one
+	// hardcoded Translation string, in the same "%[desat]:[tint]" syntax
+	// RS_Main already uses on monster skins (RS_Archvile.zs). SetHot() is
+	// inherited unchanged by every one of them, and A_ChangeModel's modeldef
+	// argument there is the LITERAL name 'RS_HolsterMarker', not
+	// self.GetClassName() -- so every subclass still redirects model lookup
+	// to the one MODELDEF block that actually exists, regardless of which of
+	// these actually gets spawned. Translation is the only thing that
+	// differs; model binding does not care which of these it is.
+	static class<Actor> holsterMarkerColorClass()
+	{
+		let cv = CVar.GetCVar("rs_holster_marker_color", players[consoleplayer]);
+		int c = (cv != null) ? cv.GetInt() : 0;
+		switch (c)
+		{
+			case 1: return "RS_HolsterMarker_Blue";
+			case 2: return "RS_HolsterMarker_Red";
+			case 3: return "RS_HolsterMarker_Gold";
+			case 4: return "RS_HolsterMarker_Purple";
+			default: return "RS_HolsterMarker";
+		}
+	}
 
 	void SetHot(bool hot)
 	{
-		if (everSet && hot == isHot)
+		int wantShape = holsterMarkerShape();
+		if (everSet && hot == isHot && wantShape == lastShape)
 			return;
 		isHot = hot;
 		everSet = true;
+		lastShape = wantShape;
 
 		// Literal labels only -- a StateLabel cannot be produced by a ternary
 		// or built from a string at runtime.
@@ -79,7 +129,8 @@ class RS_HolsterMarker : Actor
 		// and A_ChangeModel is the mechanism already proven to work on the
 		// weapon props -- so use the one that is known good.
 		name skinWanted = hot ? 'rs_wire_hot.png' : 'rs_wire_idle.png';
-		A_ChangeModel('RS_HolsterMarker', 0, "models", 'rs_holster_bracket.obj', 0, "models", skinWanted);
+		name modelWanted = (wantShape == 1) ? 'rs_wiresphere.obj' : 'rs_holster_bracket.obj';
+		A_ChangeModel('RS_HolsterMarker', 0, "models", modelWanted, 0, "models", skinWanted);
 	}
 
 	// 0 = no hand within sense range, 1 = hand exactly at the anchor. Fed by
@@ -114,6 +165,32 @@ class RS_HolsterMarker : Actor
 		else
 			Alpha = 0.85;
 	}
+}
+
+// The color palette for RS_HolsterMarker.holsterMarkerColorClass(). Each one
+// adds ONLY a Translation -- everything else (states, Tick, SetHot, the
+// shape choice) is inherited unchanged, and SetHot's A_ChangeModel already
+// redirects model lookup to the parent class's literal name regardless of
+// which of these is actually spawned, so subclassing here cannot break model
+// binding. Desaturation weights are the standard NTSC luma split
+// (0.30/0.59/0.11) for all four -- only the tint range after that differs.
+// Same "%[desat]:[tint]" syntax RS_Main already uses on monster skins
+// (RS_Archvile.zs), not a new mechanism.
+class RS_HolsterMarker_Blue : RS_HolsterMarker
+{
+	Default { Translation "0:255=%[0.30,0.59,0.11]:[0.35,0.65,2.00]"; }
+}
+class RS_HolsterMarker_Red : RS_HolsterMarker
+{
+	Default { Translation "0:255=%[0.30,0.59,0.11]:[2.00,0.35,0.35]"; }
+}
+class RS_HolsterMarker_Gold : RS_HolsterMarker
+{
+	Default { Translation "0:255=%[0.30,0.59,0.11]:[2.00,1.55,0.30]"; }
+}
+class RS_HolsterMarker_Purple : RS_HolsterMarker
+{
+	Default { Translation "0:255=%[0.30,0.59,0.11]:[1.40,0.35,1.85]"; }
 }
 
 class RS_HolsterProp : Actor

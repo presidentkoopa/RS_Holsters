@@ -654,8 +654,20 @@ class RS_HolsterManager : EventHandler
 
 			// --- the ring marker: always present, so an empty holster is
 			// still something the player can see and aim a hand at ---
+			//
+			// Color is a CLASS choice (RS_HolsterMarker.holsterMarkerColorClass,
+			// RS_HolsterProp.zs), not a settable field -- an existing marker
+			// whose class no longer matches the cvar gets destroyed and
+			// respawned so a color change takes effect immediately instead of
+			// waiting for something else to force a respawn later.
+			class<Actor> wantColorClass = RS_HolsterMarker.holsterMarkerColorClass();
+			if (markers[pi] != null && markers[pi].GetClass() != wantColorClass)
+			{
+				markers[pi].Destroy();
+				markers[pi] = null;
+			}
 			if (markers[pi] == null)
-				markers[pi] = RS_HolsterMarker(Actor.Spawn("RS_HolsterMarker", at, NO_REPLACE));
+				markers[pi] = RS_HolsterMarker(Actor.Spawn(wantColorClass, at, NO_REPLACE));
 
 			if (markers[pi] != null)
 			{
