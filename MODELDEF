@@ -1,4 +1,4 @@
-Model RS_HolsterMarker
+Model RS_HardPointMarker
 {
 	Path "models"
 	Model 0 "rs_holster_bracket.obj"

@@ -1,4 +1,4 @@
-// Holster anchor markers -- RS_HolsterMarker (RS_HolsterProp.zs).
+// Holster anchor markers -- RS_HardPointMarker (RS_HardPointProp.zs).
 // Frame A is idle, frame B is "a hand is inside this holster's radius".
 // Offset is dead centre, not bottom-origin: these mark a point in space,
 // not something standing on the floor.

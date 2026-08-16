@@ -1,4 +1,4 @@
-# Packs this repo into RS_Holsters.zip.
+# Packs this repo into RS_HardPoints.zip.
 #
 # ALWAYS DELETES THE OLD ZIP FIRST. `7z a` on an existing archive only adds
 # and updates entries -- it never removes ones whose source file is gone.
@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$out  = Join-Path $root 'RS_Holsters.zip'
+$out  = Join-Path $root 'RS_HardPoints.zip'
 $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
 
 if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
@@ -21,7 +21,7 @@ if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
 if (Test-Path $out) { Remove-Item $out -Force }
 
 & $sevenZip a -tzip -mx=0 $out "$root\*" -r `
-    '-xr!.git' '-x!.gitattributes' '-x!.gitignore' '-x!build.ps1' '-x!RS_Holsters.zip' | Out-Null
+    '-xr!.git' '-x!.gitattributes' '-x!.gitignore' '-x!build.ps1' '-x!RS_HardPoints.zip' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE" }
 
 Write-Output ("built {0} ({1:N0} bytes)" -f $out, (Get-Item $out).Length)

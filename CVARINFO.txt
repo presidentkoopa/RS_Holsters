@@ -1,66 +1,86 @@
 // Show a model of the stored weapon at each body holster anchor.
-user bool rs_holster_props = true;
+user bool rs_hardpoint_props = true;
 
 // Holster prop appearance. Live-tunable because the right values are found by
 // looking at them in the headset, not by reasoning about model units.
 // A weapon's MODELDEF Scale is tuned for the HUD projection, so reusing it on
 // a world actor renders it enormous -- hence the shrink.
-user float rs_holster_prop_scale = 0.18;
+user float rs_hardpoint_prop_scale = 0.18;
 
-// Trim on top of each holster's own pitch/roll (RS_Holsters.zs, GetHolster).
+// Same, but for the forearm/wrist hardpoints only (RS_HardPointProp.
+// holsterPropScaleArm) -- a separate, smaller default from
+// rs_hardpoint_prop_scale so a utility item on a wrist mount reads as
+// compact gear rather than a full holstered sidearm, without shrinking
+// the hip/pectoral/head holsters too.
+user float rs_hardpoint_prop_scale_arm = 0.08;
+
+// Trim on top of each holster's own pitch/roll (RS_HardPoints.zs, GetHolster).
 // Every weapon MODELDEF block carries USEACTORPITCH/USEACTORROLL (added by
 // Add-ModelDefPitchFlags.ps1), so these do real work now -- earlier they did
 // nothing at all, silently, because the renderer ignored both flags entirely.
-user float rs_holster_prop_pitch = 0.0;
-user float rs_holster_prop_roll  = 0.0;
+user float rs_hardpoint_prop_pitch = 0.0;
+user float rs_hardpoint_prop_roll  = 0.0;
 
 // Centring trim, on top of the AUTOMATIC correction (level.GetModelOffsetHint,
-// read per-weapon in RS_HolsterProp.ShowWeapon). Residual now, not the whole
+// read per-weapon in RS_HardPointProp.ShowWeapon). Residual now, not the whole
 // mechanism -- a weapon's baked MODELDEF Offset is measured and cancelled
 // automatically; these three exist for whatever the automatic fix does not
 // fully resolve for a given model.
-user float rs_holster_prop_up   = 0.0;
-user float rs_holster_prop_fwd  = 0.0;
-user float rs_holster_prop_side = 0.0;
+user float rs_hardpoint_prop_up   = 0.0;
+user float rs_hardpoint_prop_fwd  = 0.0;
+user float rs_hardpoint_prop_side = 0.0;
 
 // Yaw trim, plus the automatic mirror-flip and AngleOffset cancellation
 // (level.GetModelOrientationHint) applied ahead of it.
-user float rs_holster_prop_yaw = 0.0;
+user float rs_hardpoint_prop_yaw = 0.0;
 
-// The store/draw confirm sound (RS_Holsters.zs doSwap).
-user bool rs_holster_sound = true;
+// The store/draw confirm sound (RS_HardPoints.zs doSwap).
+user bool rs_hardpoint_sound = true;
 
 // Which sound plays: 0 = rs_fx_holster (the holster's own clunk, RS_Main
 // SNDINFO, previously unused), 1 = rs_allclear_ready (the AllClear
 // ready-to-fire beep, RS_Main RS_Weapon.zs -- same lump, different job).
 // AllClear defaults off now (RS_Main CVARINFO.txt, rs_allclear_enable) so
 // this is where that sound lives if you want it, without needing both.
-user int rs_holster_sound_style = 0;
+user int rs_hardpoint_sound_style = 0;
 
 // Store/draw uses GZDoom's own CF_INSTANTWEAPSWITCH cheat flag (constants.zs),
 // set transiently around the MoveWeaponToHand call and restored right after
-// (RS_Holsters.zs, moveWeaponInstant) -- so ordinary weapon switching (number
+// (RS_HardPoints.zs, moveWeaponInstant) -- so ordinary weapon switching (number
 // keys, the wheel) is untouched, only a holster-triggered swap is instant.
 // Also what makes two-hand near-simultaneous store/draw work: with this on,
 // the whole lower-then-raise cycle resolves the same tic instead of over
 // ~16 tics, so there is no shared-PendingWeapon window for a second hand's
 // swap to collide with.
-user bool rs_holster_instant_switch = true;
+user bool rs_hardpoint_instant_switch = true;
 
 // Marker look. Shape reads at SetHot's next re-check (immediate, since
-// SetHot's guard watches this cvar too -- RS_HolsterProp.zs). Color is a
+// SetHot's guard watches this cvar too -- RS_HardPointProp.zs). Color is a
 // class choice, not a field, so a change respawns the marker the next tic
-// (RS_Holsters.zs updateProps) rather than tinting an existing one live.
+// (RS_HardPoints.zs updateProps) rather than tinting an existing one live.
 // 0 = bracket reticle, 1 = the original wireframe sphere.
-user int rs_holster_marker_shape = 0;
+user int rs_hardpoint_marker_shape = 0;
 // 0 = default (untinted), 1 = blue, 2 = red, 3 = gold, 4 = purple.
-user int rs_holster_marker_color = 0;
+user int rs_hardpoint_marker_color = 0;
 
 // How many of the 8 declared holsters are live: 2 = hip, 4 = +shoulder,
-// 6 = +pectoral, 8 = +second hip pair (RS_Holsters.zs, GetHolster/
+// 6 = +pectoral, 8 = +second hip pair (RS_HardPoints.zs, GetHolster/
 // activeCount). Snapped to the nearest of those four on read, so any other
 // value (a hand-edited ini, an old config) still resolves to something
 // sane rather than an in-between state nothing was ever tuned for.
 // Defaults to everything on -- the point of just having added the second
 // hip pair is seeing it, not opting into it separately.
-user int rs_holster_active_count = 8;
+user int rs_hardpoint_active_count = 8;
+
+// Off-hand-anchored forearm/wrist hardpoints (RS_HardPoints.zs, GetHolster
+// indices 8-13, HAND_HOLSTER_START/armActiveCount). A SEPARATE tier from
+// rs_hardpoint_active_count on purpose: this rig tracks the off hand's own
+// live pose rather than the torso, which is new and unproven next to the
+// 8 already-tuned body holsters, so it needs its own on/off without
+// touching an already-tuned body setup. 0 = off, 3 = forearm hardpoints
+// only (Forearm1/2/3), 6 = forearm + wrist (+ WristBelow/Knuckle/Joint).
+// Snapped to the nearest of those three on read, same reasoning as
+// rs_hardpoint_active_count. Defaults OFF, unlike the body tiering -- this
+// is a new rig being verified in headset, not an incremental addition to
+// something already trusted.
+user int rs_hardpoint_arm_active_count = 0;

@@ -1,4 +1,4 @@
 Gameinfo
 {
-	AddEventHandlers = "RS_HolsterManager"
+	AddEventHandlers = "RS_HardPointManager"
 }
