@@ -38,16 +38,31 @@ AddOptionMenu "OptionsMenu"
 }
 
 // ---------------------------------------------------------------------
-// Body Holsters. Everything that used to need a netevent typed into the
-// console, plus the engine cvars that govern how grip behaves.
-//
-// SafeCommand rather than Command for the destructive/modal ones: edit
-// mode and reset both change state you would not want triggered by a
-// misread controller press while scrolling a menu in VR.
+// Body Holsters. Split into subpages rather than one long scroll -- this
+// had grown to 7 sections in one page, which is a lot to scroll through in
+// VR for a single setting. Diagnostics stayed on the root page rather than
+// getting its own subpage: one SafeCommand is not worth a whole submenu.
 // ---------------------------------------------------------------------
 OptionMenu "RS_HolsterOptions"
 {
 	Title "Body Holsters"
+	StaticText " "
+
+	Submenu "Placement & Profiles", "RS_HolsterPlacement"
+	Submenu "Appearance & Sound",   "RS_HolsterAppearance"
+	Submenu "Timing & Grip",        "RS_HolsterTiming"
+	StaticText " "
+
+	StaticText "Diagnostics", "Gold"
+	SafeCommand "Debug dump to console", "netevent rs-holster-debug"
+}
+
+// SafeCommand rather than Command for the destructive/modal ones: edit
+// mode and reset both change state you would not want triggered by a
+// misread controller press while scrolling a menu in VR.
+OptionMenu "RS_HolsterPlacement"
+{
+	Title "Placement & Profiles"
 	StaticText " "
 
 	StaticText "Placement", "Gold"
@@ -68,6 +83,11 @@ OptionMenu "RS_HolsterOptions"
 	SafeCommand "Load SEATED",              "netevent rs-holster-load-seated"
 	StaticText " "
 	SafeCommand "SWITCH seated/standing",   "netevent rs-holster-switch-profile"
+}
+
+OptionMenu "RS_HolsterAppearance"
+{
+	Title "Appearance & Sound"
 	StaticText " "
 
 	StaticText "Display", "Gold"
@@ -86,6 +106,11 @@ OptionMenu "RS_HolsterOptions"
 	StaticText "Sound", "Gold"
 	Option "Store/draw confirm sound", "rs_holster_sound", "OnOff"
 	Option "Confirm sound style",      "rs_holster_sound_style", "RS_HolsterSoundStyle"
+}
+
+OptionMenu "RS_HolsterTiming"
+{
+	Title "Timing & Grip"
 	StaticText " "
 
 	StaticText "Timing", "Gold"
@@ -106,8 +131,4 @@ OptionMenu "RS_HolsterOptions"
 	Option "Grip works holsters",       "vr_holster_use_grip", "OnOff"
 	Option "Two handed weapons",        "vr_two_handed_weapons", "OnOff"
 	Slider "Stabilize distance (in)",   "vr_stabilize_distance_inches", 1.0, 24.0, 1.0, 0
-	StaticText " "
-
-	StaticText "Diagnostics", "Gold"
-	SafeCommand "Debug dump to console", "netevent rs-holster-debug"
 }

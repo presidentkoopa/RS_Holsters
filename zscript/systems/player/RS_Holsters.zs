@@ -647,7 +647,7 @@ class RS_HolsterManager : EventHandler
 			{
 				int pi = (i * HOLSTER_COUNT) + h;
 				if (pi < props.Size() && props[pi] != null)
-					props[pi].bINVISIBLE = true;
+					props[pi].SetVisible(false);
 			}
 			return;
 		}
@@ -668,9 +668,9 @@ class RS_HolsterManager : EventHandler
 			if (!holsterActive(h))
 			{
 				if (pi < markers.Size() && markers[pi] != null)
-					markers[pi].bINVISIBLE = true;
+					markers[pi].SetVisible(false);
 				if (pi < props.Size() && props[pi] != null)
-					props[pi].bINVISIBLE = true;
+					props[pi].SetVisible(false);
 				continue;
 			}
 
@@ -706,7 +706,7 @@ class RS_HolsterManager : EventHandler
 
 			if (markers[pi] != null)
 			{
-				markers[pi].bINVISIBLE = false;
+				markers[pi].SetVisible(true);
 				markers[pi].SetOrigin(at, true);
 				markers[pi].SetHot(nearMain[i] == h || nearOff[i] == h);
 

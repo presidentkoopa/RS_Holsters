@@ -144,9 +144,39 @@ class RS_HolsterMarker : Actor
 		proximity01 = (t < 0.0) ? 0.0 : (t > 1.0) ? 1.0 : t;
 	}
 
+	// Fade instead of a hard bINVISIBLE cut. FADE_STEP is a CLASS-level
+	// const, not a local one -- a const declared inside a method body has no
+	// precedent anywhere in this codebase and no way to confirm ZScript even
+	// allows it without a test-compile this session cannot do (caught making
+	// exactly that mistake once already tonight, in RS_Holsters.zs).
+	const FADE_STEP = 0.125;   // ~8 tics for a full fade, either direction
+
+	private double fadeAlpha;
+	private bool   fadeVisible;
+
+	void SetVisible(bool show)
+	{
+		fadeVisible = show;
+		if (show)
+			bINVISIBLE = false;   // visible-but-transparent during fade-in, not hidden
+	}
+
 	override void Tick()
 	{
 		Super.Tick();
+
+		if (fadeVisible)
+		{
+			fadeAlpha += FADE_STEP;
+			if (fadeAlpha > 1.0) fadeAlpha = 1.0;
+		}
+		else
+		{
+			fadeAlpha -= FADE_STEP;
+			if (fadeAlpha < 0.0) fadeAlpha = 0.0;
+			if (fadeAlpha <= 0.0)
+				bINVISIBLE = true;   // only actually hide once fully faded out
+		}
 
 		// Tighten: brackets draw inward as a hand approaches. Actor Scale is
 		// a straight multiplier on top of MODELDEF's own Scale (RenderModel:
@@ -160,10 +190,10 @@ class RS_HolsterMarker : Actor
 		// the time is noise the player has to learn to filter out, which
 		// defeats the point of a state cue. Idle stays flat at the base
 		// alpha; only the one you could actually reach right now moves.
-		if (isHot)
-			Alpha = 0.70 + 0.25 * sin(360.0 * ((level.time % 70) / 70.0));
-		else
-			Alpha = 0.85;
+		// Multiplied by fadeAlpha, not replaced by it, so the pulse and the
+		// fade compose instead of one clobbering the other mid-transition.
+		double baseAlpha = isHot ? (0.70 + 0.25 * sin(360.0 * ((level.time % 70) / 70.0))) : 0.85;
+		Alpha = fadeAlpha * baseAlpha;
 	}
 }
 
@@ -306,6 +336,82 @@ class RS_HolsterProp : Actor
 		return (cv != null) ? cv.GetFloat() : 0.0;
 	}
 
+	// Fade instead of a hard bINVISIBLE cut, same mechanism as
+	// RS_HolsterMarker (own copy, not shared -- these two classes have no
+	// common base below Actor to hang a shared const/method off of).
+	const FADE_STEP = 0.125;
+
+	// The store/draw settle pop: a fresh weapon starts slightly OVERSIZED and
+	// eases down to its real scale over POP_TICS, instead of just appearing
+	// at final size. Pure polish -- POP_OVERSHOOT of 1.0 would make this a
+	// no-op, so nothing breaks if these ever need retuning.
+	const POP_TICS = 6;
+	const POP_OVERSHOOT = 1.35;
+
+	private double fadeAlpha;
+	private bool   fadeVisible;
+	private double baseScale;
+	private int    popTicsRemaining;
+
+	// Set true only by the w==null branch of ShowWeapon, and consumed here
+	// once the fade-out actually finishes. The model/sprite reset used to
+	// happen IMMEDIATELY on that transition -- but that is exactly what a
+	// fade-out needs to still be showing while it plays. Clear on the spot
+	// and there is nothing left to fade; defer it and the old weapon fades
+	// out looking like itself, then vanishes for real only once Alpha has
+	// actually reached 0.
+	private bool pendingClear;
+
+	void SetVisible(bool show)
+	{
+		fadeVisible = show;
+		if (show)
+			bINVISIBLE = false;
+	}
+
+	override void Tick()
+	{
+		Super.Tick();
+
+		if (fadeVisible)
+		{
+			fadeAlpha += FADE_STEP;
+			if (fadeAlpha > 1.0) fadeAlpha = 1.0;
+		}
+		else
+		{
+			fadeAlpha -= FADE_STEP;
+			if (fadeAlpha < 0.0) fadeAlpha = 0.0;
+			if (fadeAlpha <= 0.0)
+			{
+				bINVISIBLE = true;
+				if (pendingClear)
+				{
+					ClearModelStateFrames();
+					sprite = GetSpriteIndex("TNT1");
+					frame = 0;
+					pendingClear = false;
+				}
+			}
+		}
+		Alpha = fadeAlpha;
+
+		double popMult = 1.0;
+		if (popTicsRemaining > 0)
+		{
+			// (popTicsRemaining * 1.0) rather than a double(...) cast -- no
+			// precedent anywhere in this codebase for that cast syntax in
+			// ZScript specifically, and no way to test-compile to find out.
+			// Multiplying by a double literal forces float promotion using
+			// only ordinary arithmetic operator rules, which every C-family
+			// language shares regardless of its exact cast syntax.
+			double t = 1.0 - ((popTicsRemaining * 1.0) / POP_TICS);
+			popMult = POP_OVERSHOOT - ((POP_OVERSHOOT - 1.0) * t);
+			popTicsRemaining--;
+		}
+		Scale = (baseScale * popMult, baseScale * popMult);
+	}
+
 	States
 	{
 	Spawn:
@@ -324,10 +430,8 @@ class RS_HolsterProp : Actor
 
 		if (w == null)
 		{
-			ClearModelStateFrames();
-			sprite = GetSpriteIndex("TNT1");
-			frame = 0;
-			bINVISIBLE = true;
+			pendingClear = true;   // Tick() clears the model once faded out
+			SetVisible(false);
 			mirrored = false;
 			bakedAngleOffset = 0.0;
 			bakedPitchOffset = 0.0;
@@ -341,11 +445,12 @@ class RS_HolsterProp : Actor
 		State rs = w.FindState("Ready");
 		if (rs == null)
 		{
-			bINVISIBLE = true;
+			SetVisible(false);
 			return;
 		}
 
-		bINVISIBLE = false;
+		pendingClear = false;   // showing something new; any stale deferred clear is moot
+		SetVisible(true);
 		sprite = rs.sprite;
 		frame  = rs.Frame;
 
@@ -374,8 +479,8 @@ class RS_HolsterProp : Actor
 		// that scale on a world actor and you get a rifle the size of a car --
 		// which is exactly what happened. Shrink it back to something that
 		// reads as the same object you were just holding.
-		double s = holsterPropScale();
-		scale = (s, s);
+		baseScale = holsterPropScale();
+		popTicsRemaining = POP_TICS;   // settle-pop on every fresh show
 
 		// Borrow the weapon's model definition onto this instance. After this,
 		// FindModelFrame resolves against the weapon's class rather than
