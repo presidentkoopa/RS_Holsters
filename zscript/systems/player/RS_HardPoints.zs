@@ -1540,8 +1540,10 @@ class RS_HardPointManager : EventHandler
 				return;
 			}
 
-			// Coming back out, so it is an ordinary auto-switch candidate again.
+			// Coming back out, so it is an ordinary auto-switch candidate again,
+			// and weapnext/weapprev/slot-select can land on it again too.
 			w.bNoAutoSwitchTo = w.Default.bNoAutoSwitchTo;
+			w.bHolsterHidden = false;
 
 			// MoveWeaponToHand, never a raw OffhandWeapon assignment.
 			// Assigning the pointer directly leaves the hand's psprite
@@ -1581,8 +1583,21 @@ class RS_HardPointManager : EventHandler
 		// (the fists it is compared against are +WEAPON.WIMPY_WEAPON, so the
 		// test always passes) -- and then the holster and the hand both claim
 		// the same gun. Restored on draw, above.
+		//
+		// bHolsterHidden alongside it, same lifecycle: without this,
+		// weapnext/weapprev/slot-select would still happily cycle straight
+		// to a weapon that is sitting in a holster, pulling it into the hand
+		// through a path that never goes through doSwap at all -- the
+		// holster would then show empty (this mod's own reconciliation in
+		// updateProps catches the desync) while the gun ends up in-hand
+		// unasked for. bHolsterHidden makes CheckAmmo itself refuse to
+		// treat a stowed weapon as a valid candidate, which is what actually
+		// keeps it out of the cycle in the first place.
 		if (held != null && heldName != "")
+		{
 			held.bNoAutoSwitchTo = true;
+			held.bHolsterHidden = true;
+		}
 
 		// Charged only now that real work happened -- see the check at the top.
 		lastSwapTic[i] = level.time;
