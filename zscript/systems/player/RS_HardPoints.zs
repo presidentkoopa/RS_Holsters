@@ -1057,7 +1057,7 @@ class RS_HardPointManager : EventHandler
 			// a wrist-mounted flashlight should read as compact gear, not a
 			// full holstered sidearm.
 			double propScale = isHandAnchored(h) ? RS_HardPointProp.holsterPropScaleArm() : RS_HardPointProp.holsterPropScale();
-			p.ShowWeapon(stored == "" ? null : Weapon(pawn.FindInventory(stored)), propScale);
+			p.ShowWeapon(stored == "" ? null : Weapon(pawn.FindInventory(stored)), propScale, hsRadius);
 
 			// Face the same way the BODY does (not the head), so a holstered
 			// gun stays put on the hip when you look around, plus a tunable
@@ -1748,8 +1748,22 @@ class RS_HardPointManager : EventHandler
 		double finalPitch = basePitch + edPitch[h] + RS_HardPointProp.holsterPropPitch() - pitOff;
 
 		double finalRoll = baseRoll + edRoll[h] + RS_HardPointProp.holsterPropRoll() - rolOff;
+
+		// Same fill-vs-fallback split ShowWeapon actually applies -- kept as
+		// its own copy for the same independent-recomputation reason as the
+		// angle/pitch/roll split above, not factored out into a shared
+		// helper. Using the REAL applied scale here (not always the flat
+		// fallback) matters: GetModelWorldOffset's own correctness depends
+		// on being handed the actor scale that is actually in effect, or
+		// this dump's "world offset" stops matching what is really on screen.
+		bool foundBounds; double measuredRadius;
+		[foundBounds, measuredRadius] = level.GetModelBoundsHint(w.GetClass(), rs.sprite, rs.Frame);
+		double fallbackScale = isHandAnchored(h) ? RS_HardPointProp.holsterPropScaleArm() : RS_HardPointProp.holsterPropScale();
+		double propScale = (foundBounds && measuredRadius > 0.0)
+			? (hsRadius * RS_HardPointProp.holsterPropFill()) / measuredRadius
+			: fallbackScale;
+
 		bool foundWorld; double worldDX, worldDY, worldDZ;
-		double propScale = RS_HardPointProp.holsterPropScale();
 		[foundWorld, worldDX, worldDY, worldDZ] =
 			level.GetModelWorldOffset(w.GetClass(), rs.sprite, rs.Frame, stretch, finalAngle, finalPitch, finalRoll,
 			                          propScale, propScale);
@@ -1759,6 +1773,8 @@ class RS_HardPointManager : EventHandler
 			foundOri, mirrored, angOff, pitOff, rolOff);
 		Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
 			foundOff, offX, offY, offZ);
+		Console.Printf("  bounds hint:      found=%d  radius=%.2f  holster r=%.2f fill=%.2f -> scale=%.4f  (fallback would be %.4f)",
+			foundBounds, measuredRadius, hsRadius, RS_HardPointProp.holsterPropFill(), propScale, fallbackScale);
 		Console.Printf("  world offset:     found=%d  world(x,y,z)= %.2f, %.2f, %.2f  (via GetModelWorldOffset, replays the engine's own rotation)",
 			foundWorld, worldDX, worldDY, worldDZ);
 		Console.Printf("  applied:          angle=%.1f pitch=%.1f  (base angle %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",

@@ -288,6 +288,15 @@ class RS_HardPointProp : Actor
 		return (cv != null) ? cv.GetFloat() : 0.08;
 	}
 
+	// Fraction of the holster's own radius a measured model gets scaled to
+	// fill. See CVARINFO.txt for why this is a separate dial from the flat
+	// scale/scale_arm fallbacks rather than replacing them.
+	static double holsterPropFill()
+	{
+		let cv = CVar.GetCVar("rs_hardpoint_prop_fill", players[consoleplayer]);
+		return (cv != null) ? cv.GetFloat() : 0.55;
+	}
+
 	// Yaw offset applied to every stored weapon, and a separate 180 for
 	// main-hand weapons whose models are mirrored.
 	//
@@ -429,13 +438,16 @@ class RS_HardPointProp : Actor
 		Stop;
 	}
 
-	// Show a weapon, or pass null to go empty/invisible. propScale is always
-	// passed in explicitly by the caller (holsterPropScale() or
+	// Show a weapon, or pass null to go empty/invisible. fallbackScale is
+	// always passed in explicitly by the caller (holsterPropScale() or
 	// holsterPropScaleArm(), picked per-holster in updateProps) rather than
 	// read here via a default parameter value -- no confirmed precedent for
 	// user-method default args anywhere in this codebase, and no way to
 	// test-compile to find out, so the one call site just always supplies it.
-	void ShowWeapon(Weapon w, double propScale)
+	// holsterRadius is that same holster's hsRadius, passed through so a
+	// measured model can be scaled to fill IT specifically rather than some
+	// value this method would otherwise have no way to see.
+	void ShowWeapon(Weapon w, double fallbackScale, double holsterRadius)
 	{
 		let wantClass = (w != null) ? w.GetClass() : null;
 		if (wantClass == shownClass)
@@ -493,8 +505,22 @@ class RS_HardPointProp : Actor
 		// the model sits inches from the camera under its own projection. Reuse
 		// that scale on a world actor and you get a rifle the size of a car --
 		// which is exactly what happened. Shrink it back to something that
-		// reads as the same object you were just holding.
-		baseScale = propScale;
+		// reads as the same object you were just holding. fallbackScale is
+		// that flat shrink, used as-is when there is no real geometry to
+		// measure.
+		//
+		// When there IS real geometry, solve for the scale that makes this
+		// SPECIFIC model's measured bounding radius fill a fraction of THIS
+		// holster's own radius, instead of applying fallbackScale (a flat
+		// number identical for every weapon) regardless of how physically
+		// big the model actually is -- a BFG and a pistol stop reading as
+		// the same size for no reason other than sharing one constant.
+		bool foundBounds; double measuredRadius;
+		[foundBounds, measuredRadius] = level.GetModelBoundsHint(w.GetClass(), sprite, frame);
+		if (foundBounds && measuredRadius > 0.0)
+			baseScale = (holsterRadius * holsterPropFill()) / measuredRadius;
+		else
+			baseScale = fallbackScale;
 		popTicsRemaining = POP_TICS;   // settle-pop on every fresh show
 
 		// Borrow the weapon's model definition onto this instance. After this,

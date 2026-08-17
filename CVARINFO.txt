@@ -14,6 +14,18 @@ user float rs_hardpoint_prop_scale = 0.18;
 // the hip/pectoral/head holsters too.
 user float rs_hardpoint_prop_scale_arm = 0.08;
 
+// Fraction of a holster's own claim radius that a stored weapon's MEASURED
+// bounding radius (level.GetModelBoundsHint) gets scaled to fill, so a BFG
+// and a pistol read as "the same size in the ring" instead of both taking
+// the same flat multiplier regardless of how big either model actually is.
+// Only takes effect when the native finds real geometry to measure (every
+// weapon in this arsenal is an OBJ, which it does); rs_hardpoint_prop_scale/
+// _arm above remain the exact fallback for anything it can't measure, same
+// as before this existed. Under 1.0 on purpose -- a weapon that exactly
+// touches the marker sphere's edge reads as clipping out of it, not as
+// filling it.
+user float rs_hardpoint_prop_fill = 0.55;
+
 // Trim on top of each holster's own pitch/roll (RS_HardPoints.zs, GetHolster).
 // Every weapon MODELDEF block carries USEACTORPITCH/USEACTORROLL (added by
 // Add-ModelDefPitchFlags.ps1), so these do real work now -- earlier they did
