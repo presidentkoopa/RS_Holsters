@@ -21,7 +21,7 @@ if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
 if (Test-Path $out) { Remove-Item $out -Force }
 
 & $sevenZip a -tzip -mx=0 $out "$root\*" -r `
-    '-xr!.git' '-x!.gitattributes' '-x!.gitignore' '-x!build.ps1' '-x!RS_HardPoints.zip' | Out-Null
+    '-xr!.git' '-x!.gitattributes' '-x!.gitignore' '-x!build.ps1' '-x!RS_HardPoints.zip' '-xr!media' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE" }
 
 Write-Output ("built {0} ({1:N0} bytes)" -f $out, (Get-Item $out).Length)

@@ -1,5 +1,7 @@
 # Holsters and Hardpoints
 
+![Holsters in action](media/holster_demo.gif)
+
 Reach down. Grab your hip. There's a gun there.
 
 Up to eight body-anchored holsters — hip, head-side, pectoral, and a second hip pair — that live in physical space around you, not in a menu. Grip a weapon near one and it locks in place, glowing and ready. Reach back for it later with either hand and it's exactly where you left it. Pick how many you want live — 2, 4, 6, or all 8 — right from the options menu.
