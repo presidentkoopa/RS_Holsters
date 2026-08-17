@@ -318,10 +318,22 @@ class RS_HardPointProp : Actor
 		return (cv != null) ? cv.GetFloat() : 0.0;
 	}
 
+	// Fallback was 90.0 here while CVARINFO.txt declared the cvar's real
+	// default as 0.0 -- two places stating the same default, silently
+	// disagreeing. That mattered: GetHolster's own table already defaults
+	// EVERY torso holster's hsPitch to 90.0 (barrel down), and edPitch[h]
+	// (below, via updateProps/dumpOneHolsterProp) is a straight copy of it
+	// -- this cvar is documented as a TRIM on top of that per-holster
+	// value, not a second full contribution. At the old 90.0 fallback,
+	// clean defaults summed to 180 degrees (90 from the table, 90 again
+	// here), not 90 -- nowhere near "points at the floor", and close
+	// enough to the flip-over point that per-weapon pitch differences
+	// pushed some guns visibly up and others down. 0.0 matches CVARINFO.txt
+	// and actually behaves like a trim: does nothing until you move it.
 	static double holsterPropPitch()
 	{
 		let cv = CVar.GetCVar("rs_hardpoint_prop_pitch", players[consoleplayer]);
-		return (cv != null) ? cv.GetFloat() : 90.0;
+		return (cv != null) ? cv.GetFloat() : 0.0;
 	}
 
 	static double holsterPropRoll()
