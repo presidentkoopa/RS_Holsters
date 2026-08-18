@@ -236,13 +236,21 @@ class RS_HardPointManager : EventHandler
 	// as holding fists -- the fist is never stored, it is what empty looks like.
 	Array<string> contents;
 
-	// Per PLAYER, not per hand, and deliberately so. player.PendingWeapon is a
-	// SINGLE field shared by both hands, and BringUpWeapon consumes it
-	// hand-blind. With a per-hand cooldown, an off-hand store landing inside the
-	// main hand's still-running lower overwrote the main hand's PendingWeapon --
-	// so that switch completed into the WRONG hand, the main hand got nothing,
-	// and its weapon was never actually put away.
-	int lastSwapTic[MAXPLAYERS];
+	// Split per-hand, but doSwap below still enforces the per-PLAYER
+	// (shared) gate too whenever instant switch is off -- read that
+	// function's comment before changing either of these back to one
+	// array. Short version of why one array alone was wrong either way:
+	// a single per-player value drops a genuinely-simultaneous two-hand
+	// press outright (the bug this split fixes), but a naive per-hand
+	// split reintroduces an OLDER, already-found bug -- player.PendingWeapon
+	// is a SINGLE field shared by both hands, consumed hand-blind by
+	// BringUpWeapon, and with instant switch off (~16-tic lower/raise) an
+	// off-hand store landing while the main hand's switch is still
+	// resolving overwrote it out from under that switch, so it completed
+	// into the WRONG hand and the main hand's weapon was never actually
+	// put away.
+	int lastSwapTicMain[MAXPLAYERS];
+	int lastSwapTicOff[MAXPLAYERS];
 
 	// One prop per holster per player, flattened like contents. Held as
 	// pointers so a destroyed prop (level change, player death) reads null and
@@ -343,8 +351,17 @@ class RS_HardPointManager : EventHandler
 				// very first WorldTick pass after calibration can't misread a
 				// zero-default as "holster 0 has a pending dump" and print an
 				// empty auto-dump header before anything has ever been stored.
+				// nearMain/nearOff need the exact same reset and, until now,
+				// never got one: a grip-bound key pressed before this tic (or
+				// any time after ForceRecalibrate, which does not touch these
+				// either) could doSwap against holster 0 with updateClaims
+				// never having run a single proximity test.
 				if (calibrated[i] && !wasCalibrated)
+				{
 					pendingDump[i] = -1;
+					nearMain[i] = -1;
+					nearOff[i] = -1;
+				}
 				continue; // no anchors, no claims, until calibration lands
 			}
 
@@ -755,14 +772,16 @@ class RS_HardPointManager : EventHandler
 	// Loads into the LIVE edit table, same as dragging every sphere by hand --
 	// so it takes effect immediately (updateProps reads edFwd/etc every tic)
 	// and a bad or missing profile just leaves the current table untouched
-	// rather than zeroing anything out.
-	private void loadProfile(string name)
+	// rather than zeroing anything out. Returns whether the load actually
+	// happened -- switchProfile needs to know, rather than assuming success
+	// unconditionally (see its own comment on why that used to get it stuck).
+	private bool loadProfile(string name)
 	{
 		ensureEdit();
 		if (!level.JSONProfileLoad(name))
 		{
 			Console.Printf("\cgRS_HOLSTER: no profile \"%s\" on disk", name);
-			return;
+			return false;
 		}
 		for (int h = 0; h < HOLSTER_COUNT; ++h)
 		{
@@ -783,6 +802,7 @@ class RS_HardPointManager : EventHandler
 		Console.Printf("\c[Gold]RS_HOLSTER: loaded profile \"%s\"", name);
 		if (name == "seated" || name == "standing")
 			activeProfile = name;
+		return true;
 	}
 
 	// Flips between the two saved profiles and re-samples eye height for
@@ -801,7 +821,21 @@ class RS_HardPointManager : EventHandler
 		// has never been saved and quietly falling back to those same
 		// defaults anyway.
 		string target = (activeProfile == "standing") ? "seated" : "standing";
-		loadProfile(target);
+
+		// loadProfile only advances activeProfile on an actual successful
+		// load. Used to claim success and force-recalibrate regardless --
+		// on a fresh install (activeProfile still "", nothing ever saved),
+		// target computes to "standing" every time, the load fails
+		// silently, activeProfile never moves off "", and every future
+		// press recomputed the identical "standing" target forever: this
+		// bind could never reach "seated" at all until Save/Load were used
+		// directly at least once, defeating the point of a one-press
+		// switch. Check the real result instead of assuming it.
+		if (!loadProfile(target))
+		{
+			Console.Printf("\cgRS_HOLSTER: no \"%s\" profile saved yet -- use Save current as %s first", target, target.MakeUpper());
+			return;
+		}
 		ForceRecalibrate(playerNum);
 		Console.Printf("\c[Gold]RS_HOLSTER: switched to \"%s\" -- hold still a moment for height to resample", target);
 	}
@@ -821,6 +855,39 @@ class RS_HardPointManager : EventHandler
 		nearMain[i] = -1;
 		nearOff[i] = -1;
 
+		// Check the hysteresis-held holster FIRST, with ITS widened radius,
+		// before the low-to-high scan below ever runs. The scan latches
+		// whichever index passes first in index order -- so without this,
+		// a numerically LOWER holster's ordinary (non-widened) radius could
+		// steal the claim from a higher-indexed one the hand never actually
+		// left, the moment the two overlap (e.g. an arm-rig wrist anchor
+		// and a torso hip anchor both being near the hip). The held index's
+		// own widened test has to run and win BEFORE any other index gets a
+		// chance to, not merely get a bigger number when its own turn comes
+		// up in a scan that may never reach it.
+		if (prevMain >= 0 && holsterActive(prevMain))
+		{
+			string hsNameM; double hsFwdM, hsSideM, hsFracM, hsRadiusM, hsPitchM, hsYawM, hsRollM;
+			GetHolster(prevMain, hsNameM, hsFwdM, hsSideM, hsFracM, hsRadiusM, hsPitchM, hsYawM, hsRollM);
+			Vector3 heldAnchorMain = anchorPos(i, pawn, prevMain);
+			if ((pawn.AttackPos - heldAnchorMain).Length() < hsRadiusM * CLAIM_HYSTERESIS)
+			{
+				mainClaimed = true;
+				nearMain[i] = prevMain;
+			}
+		}
+		if (prevOff >= 0 && holsterActive(prevOff) && !isHandAnchored(prevOff))
+		{
+			string hsNameO; double hsFwdO, hsSideO, hsFracO, hsRadiusO, hsPitchO, hsYawO, hsRollO;
+			GetHolster(prevOff, hsNameO, hsFwdO, hsSideO, hsFracO, hsRadiusO, hsPitchO, hsYawO, hsRollO);
+			Vector3 heldAnchorOff = anchorPos(i, pawn, prevOff);
+			if ((pawn.OffhandPos - heldAnchorOff).Length() < hsRadiusO * CLAIM_HYSTERESIS)
+			{
+				offClaimed = true;
+				nearOff[i] = prevOff;
+			}
+		}
+
 		for (int h = 0; h < HOLSTER_COUNT; ++h)
 		{
 			// An inactive holster (active count dialed below 8) is not
@@ -835,8 +902,14 @@ class RS_HardPointManager : EventHandler
 
 			Vector3 anchor = anchorPos(i, pawn, h);
 
-			double mainR = (prevMain == h) ? hsRadius * CLAIM_HYSTERESIS : hsRadius;
-			double offR  = (prevOff  == h) ? hsRadius * CLAIM_HYSTERESIS : hsRadius;
+			// The held index's own widened radius was already tried above,
+			// before this scan started -- if it won, !mainClaimed/!offClaimed
+			// below skip re-testing anything for that hand at all. Reaching
+			// here for a given hand means it does NOT currently hold a
+			// claim, so a plain (non-widened) radius is correct for every
+			// index this loop actually evaluates.
+			double mainR = hsRadius;
+			double offR  = hsRadius;
 
 			if (!mainClaimed && (pawn.AttackPos - anchor).Length() < mainR)
 			{
@@ -1037,8 +1110,11 @@ class RS_HardPointManager : EventHandler
 			// see "the stored weapon is in a hand" on the very tic after every
 			// store and erase all six holsters as fast as they were filled.
 			// PendingWeapon == WP_NOCHANGE means no switch is in flight.
+			// Max of both hands here on purpose -- this gate is about giving
+			// ANY recent swap time to settle before trusting ReadyWeapon/
+			// OffhandWeapon, not about which specific hand caused it.
 			if (stored != "" && pawn.player.PendingWeapon == WP_NOCHANGE
-			    && level.time - lastSwapTic[i] >= swapCooldown())
+			    && level.time - Max(lastSwapTicMain[i], lastSwapTicOff[i]) >= swapCooldown())
 			{
 				let rw = pawn.player.ReadyWeapon;
 				let ow = pawn.player.OffhandWeapon;
@@ -1463,8 +1539,26 @@ class RS_HardPointManager : EventHandler
 		// burned a full cooldown, so recovering from a bad slot needed two
 		// presses spaced a cooldown apart with no indication why the first did
 		// nothing.
-		if (level.time - lastSwapTic[i] < swapCooldown())
+		//
+		// Own hand's cooldown always applies (plain debounce against one
+		// physical press registering as two). The OTHER hand's cooldown
+		// only applies when instant switch is off -- see the field
+		// declarations above for why: with it off, a store takes ~16 tics
+		// to actually resolve, and PendingWeapon is one field BringUpWeapon
+		// consumes hand-blind, so the other hand's own store landing inside
+		// that window would clobber a switch that has not settled yet. With
+		// it on (the default), THIS call fully resolves PendingWeapon
+		// before returning -- nothing is left in flight for the other hand
+		// to collide with, so two hands really can swap in the same tic.
+		int sameHandTic = offhand ? lastSwapTicOff[i] : lastSwapTicMain[i];
+		if (level.time - sameHandTic < swapCooldown())
 			return;
+		if (!instantSwitchEnabled())
+		{
+			int otherHandTic = offhand ? lastSwapTicMain[i] : lastSwapTicOff[i];
+			if (level.time - otherHandTic < swapCooldown())
+				return;
+		}
 
 		ensureContents();
 
@@ -1628,7 +1722,8 @@ class RS_HardPointManager : EventHandler
 		}
 
 		// Charged only now that real work happened -- see the check at the top.
-		lastSwapTic[i] = level.time;
+		if (offhand) lastSwapTicOff[i] = level.time;
+		else         lastSwapTicMain[i] = level.time;
 
 		// Firmer and shorter than the entry tap -- a confirm, not a notice.
 		level.VRHaptic(offhand ? 1 : 0, 0.6, 15.0);
@@ -1802,9 +1897,21 @@ class RS_HardPointManager : EventHandler
 		bool foundBounds; double measuredRadius;
 		[foundBounds, measuredRadius] = level.GetModelBoundsHint(w.GetClass(), rs.sprite, rs.Frame);
 		double fallbackScale = isHandAnchored(h) ? RS_HardPointProp.holsterPropScaleArm() : RS_HardPointProp.holsterPropScale();
-		double propScale = (foundBounds && measuredRadius > 0.0)
+		double steadyStateScale = (foundBounds && measuredRadius > 0.0)
 			? (hsRadius * RS_HardPointProp.holsterPropFill()) / measuredRadius
 			: fallbackScale;
+
+		// Prefer the prop's REAL, currently-applied Scale over the formula
+		// above when the prop actually exists. The auto-dump-on-store fires
+		// one tic after every store, while Tick()'s settle-pop is still
+		// mid-ramp (up to POP_OVERSHOOT=1.35x baseScale for POP_TICS=6
+		// tics) -- the steady-state formula alone does not know about that
+		// overshoot, so it under-reports scale for every automatic dump,
+		// the tool's main "record as I play" use case, and the printed
+		// world-offset number would not match what is actually on screen
+		// that tic even though the math itself is correct.
+		int pi = (i * HOLSTER_COUNT) + h;
+		double propScale = (pi < props.Size() && props[pi] != null) ? props[pi].scale.X : steadyStateScale;
 
 		bool foundWorld; double worldDX, worldDY, worldDZ;
 		[foundWorld, worldDX, worldDY, worldDZ] =
@@ -1816,8 +1923,8 @@ class RS_HardPointManager : EventHandler
 			foundOri, mirrored, angOff, pitOff, rolOff);
 		Console.Printf("  offset hint:      found=%d  local(fwd,side,up)= %.2f, %.2f, %.2f",
 			foundOff, offX, offY, offZ);
-		Console.Printf("  bounds hint:      found=%d  radius=%.2f  holster r=%.2f fill=%.2f -> scale=%.4f  (fallback would be %.4f)",
-			foundBounds, measuredRadius, hsRadius, RS_HardPointProp.holsterPropFill(), propScale, fallbackScale);
+		Console.Printf("  bounds hint:      found=%d  radius=%.2f  holster r=%.2f fill=%.2f -> steady-state=%.4f  live=%.4f  (fallback would be %.4f)",
+			foundBounds, measuredRadius, hsRadius, RS_HardPointProp.holsterPropFill(), steadyStateScale, propScale, fallbackScale);
 		Console.Printf("  world offset:     found=%d  world(x,y,z)= %.2f, %.2f, %.2f  (via GetModelWorldOffset, replays the engine's own rotation)",
 			foundWorld, worldDX, worldDY, worldDZ);
 		Console.Printf("  applied:          angle=%.1f pitch=%.1f  (base angle %.1f, holster pitch %.1f, trim yaw %.1f pitch %.1f)",

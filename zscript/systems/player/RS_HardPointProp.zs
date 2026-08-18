@@ -269,6 +269,18 @@ class RS_HardPointProp : Actor
 	double bakedOffY;
 	double bakedOffZ;
 
+	// The model's measured bounding radius (level.GetModelBoundsHint),
+	// cached from the last class-change so ShowWeapon can recompute
+	// baseScale from it EVERY call, not just when the weapon class
+	// changes -- rs_hardpoint_prop_fill/_scale/_scale_arm need to apply
+	// live to an already-holstered weapon, not just to the next weapon
+	// that gets stored. Re-measuring the model itself every tic would be
+	// the expensive part (native call + FindModelFrame lookup); this way
+	// only the measurement is class-change-gated, and the cheap arithmetic
+	// that turns it into a scale runs unconditionally.
+	bool   boundsFound;
+	double measuredRadius;
+
 	// Live-tunable rather than baked, for the same reason the anchors are:
 	// the right number is found by looking at it in the headset, not by
 	// reasoning about model units.
@@ -462,56 +474,75 @@ class RS_HardPointProp : Actor
 	void ShowWeapon(Weapon w, double fallbackScale, double holsterRadius)
 	{
 		let wantClass = (w != null) ? w.GetClass() : null;
-		if (wantClass == shownClass)
-			return; // already showing this; rebinding every tic is pure cost
+		if (wantClass != shownClass)
+		{
+			shownClass = wantClass;
 
-		shownClass = wantClass;
+			if (w == null)
+			{
+				pendingClear = true;   // Tick() clears the model once faded out
+				SetVisible(false);
+				mirrored = false;
+				bakedAngleOffset = 0.0;
+				bakedPitchOffset = 0.0;
+				bakedRollOffset = 0.0;
+				bakedOffX = 0.0; bakedOffY = 0.0; bakedOffZ = 0.0;
+				boundsFound = false;
+				measuredRadius = 0.0;
+				return;
+			}
+
+			// The held-weapon frame is the one MODELDEF covers. Ready is where
+			// a weapon idles, so it is the pose a holstered gun should sit in.
+			State rs = w.FindState("Ready");
+			if (rs == null)
+			{
+				SetVisible(false);
+				return;
+			}
+
+			pendingClear = false;   // showing something new; any stale deferred clear is moot
+			SetVisible(true);
+			sprite = rs.sprite;
+			frame  = rs.Frame;
+
+			bool found;
+			[found, mirrored, bakedAngleOffset, bakedPitchOffset, bakedRollOffset]
+				= level.GetModelOrientationHint(w.GetClass(), sprite, frame);
+			if (!found)
+			{
+				mirrored = false;
+				bakedAngleOffset = 0.0;
+				bakedPitchOffset = 0.0;
+				bakedRollOffset = 0.0;
+			}
+
+			double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
+			bool foundOff;
+			[foundOff, bakedOffX, bakedOffY, bakedOffZ]
+				= level.GetModelOffsetHint(w.GetClass(), sprite, frame, stretch);
+			if (!foundOff)
+			{
+				bakedOffX = 0.0; bakedOffY = 0.0; bakedOffZ = 0.0;
+			}
+
+			// Measured once per class-change, same as the orientation/offset
+			// hints above -- the native call and FindModelFrame lookup are
+			// the expensive part. What that measurement is USED for (below)
+			// is not gated the same way.
+			[boundsFound, measuredRadius] = level.GetModelBoundsHint(w.GetClass(), sprite, frame);
+
+			popTicsRemaining = POP_TICS;   // settle-pop on every fresh show
+
+			// Borrow the weapon's model definition onto this instance. After
+			// this, FindModelFrame resolves against the weapon's class rather
+			// than RS_HardPointProp, and the (sprite, frame) set above
+			// completes the key.
+			A_ChangeModel(w.GetClassName());
+		}
 
 		if (w == null)
-		{
-			pendingClear = true;   // Tick() clears the model once faded out
-			SetVisible(false);
-			mirrored = false;
-			bakedAngleOffset = 0.0;
-			bakedPitchOffset = 0.0;
-			bakedRollOffset = 0.0;
-			bakedOffX = 0.0; bakedOffY = 0.0; bakedOffZ = 0.0;
-			return;
-		}
-
-		// The held-weapon frame is the one MODELDEF covers. Ready is where a
-		// weapon idles, so it is the pose a holstered gun should sit in.
-		State rs = w.FindState("Ready");
-		if (rs == null)
-		{
-			SetVisible(false);
-			return;
-		}
-
-		pendingClear = false;   // showing something new; any stale deferred clear is moot
-		SetVisible(true);
-		sprite = rs.sprite;
-		frame  = rs.Frame;
-
-		bool found;
-		[found, mirrored, bakedAngleOffset, bakedPitchOffset, bakedRollOffset]
-			= level.GetModelOrientationHint(w.GetClass(), sprite, frame);
-		if (!found)
-		{
-			mirrored = false;
-			bakedAngleOffset = 0.0;
-			bakedPitchOffset = 0.0;
-			bakedRollOffset = 0.0;
-		}
-
-		double stretch = (level.info != null) ? level.info.pixelstretch : 1.0;
-		bool foundOff;
-		[foundOff, bakedOffX, bakedOffY, bakedOffZ]
-			= level.GetModelOffsetHint(w.GetClass(), sprite, frame, stretch);
-		if (!foundOff)
-		{
-			bakedOffX = 0.0; bakedOffY = 0.0; bakedOffZ = 0.0;
-		}
+			return;   // still nothing to show; nothing below has anything to recompute
 
 		// A weapon's MODELDEF Scale is tuned for the HUD/psprite path, where
 		// the model sits inches from the camera under its own projection. Reuse
@@ -527,17 +558,28 @@ class RS_HardPointProp : Actor
 		// number identical for every weapon) regardless of how physically
 		// big the model actually is -- a BFG and a pistol stop reading as
 		// the same size for no reason other than sharing one constant.
-		bool foundBounds; double measuredRadius;
-		[foundBounds, measuredRadius] = level.GetModelBoundsHint(w.GetClass(), sprite, frame);
-		if (foundBounds && measuredRadius > 0.0)
+		//
+		// Recomputed EVERY call (every tic), not just on a class-change --
+		// otherwise rs_hardpoint_prop_fill/_scale/_scale_arm read as dead
+		// cvars on any weapon that is already sitting in a holster, since
+		// nothing else ever re-solves baseScale for it. Cheap: this is just
+		// arithmetic over the cached measurement above, no native call.
+		if (boundsFound && measuredRadius > 0.0)
 			baseScale = (holsterRadius * holsterPropFill()) / measuredRadius;
 		else
 			baseScale = fallbackScale;
-		popTicsRemaining = POP_TICS;   // settle-pop on every fresh show
 
-		// Borrow the weapon's model definition onto this instance. After this,
-		// FindModelFrame resolves against the weapon's class rather than
-		// RS_HardPointProp, and the (sprite, frame) set above completes the key.
-		A_ChangeModel(w.GetClassName());
+		// Also write the real Scale here, not just baseScale -- Tick() is
+		// the only other writer, and the engine runs WorldTick (this call's
+		// caller, updateProps) BEFORE Thinkers.RunThinkers (what actually
+		// calls Tick()) every tic, confirmed in p_tick.cpp. updateProps
+		// calls GetModelWorldOffset for centering using p.scale.X/Y right
+		// after this returns, in the SAME WorldTick pass -- without this
+		// line that call would read whatever Scale was left over from
+		// LAST tic (a different weapon's size, on a fresh store) instead
+		// of the value just solved above. Tick()'s pop-overshoot ramp
+		// still overwrites this a moment later; this just makes sure
+		// nothing reads a stale, wrong-weapon Scale in the meantime.
+		Scale = (baseScale, baseScale);
 	}
 }
