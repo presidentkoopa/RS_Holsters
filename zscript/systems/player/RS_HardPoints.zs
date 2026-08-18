@@ -1047,6 +1047,26 @@ class RS_HardPointManager : EventHandler
 
 				if (inHand || pawn.FindInventory(stored) == null)
 				{
+					// The weapon drifted back into a hand through something
+					// other than doSwap (ammo-pickup re-arm via
+					// CheckWeaponSwitch, the native VR wheel, a tier
+					// promotion) -- give it the same reset doSwap's own draw
+					// branch gives a normal draw. Clearing the table alone
+					// left the weapon ITSELF permanently flagged: excluded
+					// from weapnext/weapprev forever (CheckAmmo gates on
+					// bHolsterHidden) and, worse, unable to ever fire again
+					// (CheckAmmo gates that too, unconditionally) -- nothing
+					// else in this file clears either flag.
+					if (inHand)
+					{
+						let strayWeapon = (rw != null && rw.GetClassName() == stored) ? rw : ow;
+						if (strayWeapon != null)
+						{
+							strayWeapon.bNoAutoSwitchTo = strayWeapon.Default.bNoAutoSwitchTo;
+							strayWeapon.bHolsterHidden = false;
+						}
+					}
+
 					contents[(i * HOLSTER_COUNT) + h] = "";
 					stored = "";
 				}
@@ -1480,14 +1500,22 @@ class RS_HardPointManager : EventHandler
 		// The slot names the very gun this hand is holding. That is not a
 		// legitimate no-op -- it is a STALE SLOT. A stored weapon never leaves
 		// inventory, so CheckWeaponSwitch re-arms it on the next ammo pickup
-		// while the table still claims the holster holds it. Returning early
-		// here was the jam: that holster could then never be drawn from OR
-		// stored into again for the rest of the session, because every future
-		// press hit this same guard. Clear it and let the next press work.
+		// while the table still claims the holster holds it.
+		//
+		// Used to clear the slot and RETURN here -- that fixed the permanent
+		// jam (a stale slot could never be drawn from OR stored into again)
+		// but traded it for a quieter one: the press that discovered the
+		// stale slot did nothing visible at all (no haptic, no sound, no
+		// console line), identical to a no-op press, so it read as "I have
+		// to holster something else first to unstick it" even though the
+		// table was already fixed by that first press. Resync stored to ""
+		// and fall through into the ordinary store logic below instead, so
+		// the SAME press that finds the desync is the press that actually
+		// completes the store, with the normal confirmation.
 		if (stored != "" && stored == heldName)
 		{
 			contents[slot] = "";
-			return;
+			stored = "";
 		}
 
 		// A weapon lives in exactly one holster. Without this, storing the
