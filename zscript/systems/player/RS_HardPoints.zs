@@ -1933,7 +1933,9 @@ class RS_HardPointManager : EventHandler
 		if (!foundOri || !foundOff || !foundWorld)
 			Console.Printf("\cg  NATIVE RETURNED NOT-FOUND -- class/sprite/frame lookup failed, model may not have hasmodel set or FSpriteModelFrame is missing for this (sprite,frame)");
 
-		int pi = (i * HOLSTER_COUNT) + h;
+		// pi already declared above (same value, (i * HOLSTER_COUNT) + h) for
+		// the live-Scale read -- still in scope, nothing between there and
+		// here reassigns it.
 		if (pi < props.Size() && props[pi] != null)
 		{
 			Vector3 anchor = anchorPos(i, pawn, h);
